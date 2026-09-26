@@ -9,6 +9,7 @@ class AuditLog(models.Model):
     object_id = models.CharField(max_length=128, default="", blank=True)
     old_value = models.TextField(default="", blank=True)
     new_value = models.TextField(default="", blank=True)
+    target = models.ForeignKey("targets.Target", null=True, blank=True, on_delete=models.SET_NULL, related_name="audit_logs")
     ip = models.GenericIPAddressField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
 

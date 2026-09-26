@@ -51,14 +51,28 @@ def ingest_subdomains(target, items, source_label="pipeline"):
             suspect = True  # confirmed later by DNS stage; stored as suspect until verified
         sub, created = Subdomain.objects.get_or_create(
             target=target, hostname=hostname,
-            defaults={"sources": sources, "wildcard_suspect": suspect},
+            defaults={"sources": sources, "wildcard_suspect": suspect, "state": "DISCOVERED"},
         )
         if created:
             new_count += 1
+            sub.state = "DISCOVERED"
+            sub.is_active = True
+            sub.save(update_fields=["state", "is_active"])
             _asset(target, "SUBDOMAIN", hostname, {"sources": sources})
             emit_event("NEW_SUBDOMAIN", target=target, asset_type="SUBDOMAIN",
                        asset_id=sub.id, asset_value=hostname, source="+".join(sources[:3]),
-                       evidence={"sources": sources, "wildcard_suspect": suspect})
+                       evidence={"sources": sources, "wildcard_suspect": suspect},
+                       new_state={"hostname": hostname, "sources": sources})
+        elif not sub.is_active or sub.state in ("INACTIVE", "REMOVED", "SUSPECTED_INACTIVE"):
+            sub.is_active = True
+            sub.state = "REACTIVATED"
+            sub.last_seen = timezone.now()
+            sub.last_changed = timezone.now()
+            sub.save(update_fields=["is_active", "state", "last_seen", "last_changed"])
+            _asset(target, "SUBDOMAIN", hostname, {"sources": sources})
+            emit_event("SUBDOMAIN_REACTIVATED", target=target, asset_type="SUBDOMAIN",
+                       asset_id=sub.id, asset_value=hostname, source="+".join(sources[:3]),
+                       evidence={"sources": sources}, severity="LOW")
         else:
             merged_sources = sorted(set(sub.sources or []) | set(sources))
             if set(merged_sources) != set(sub.sources or []):
@@ -126,10 +140,27 @@ def ingest_dns(target, records):
                 if host not in hosts:
                     hosts.append(host)
                 ip.source_hostnames = hosts
-                ip.save(update_fields=["source_hostnames", "last_seen"])
+                ip.state = "DISCOVERED"
+                ip.save(update_fields=["source_hostnames", "last_seen", "state"])
                 _asset(target, "IP", val, {})
                 emit_event("NEW_IP", target=target, asset_type="IP", asset_id=ip.id,
-                           asset_value=val, source="dnsx", evidence={"hostname": host})
+                           asset_value=val, source="dnsx", evidence={"hostname": host},
+                           new_state={"ip": val, "hostname": host})
+            else:
+                hosts = ip.source_hostnames or []
+                updated = False
+                if host not in hosts:
+                    hosts.append(host)
+                    ip.source_hostnames = hosts
+                    updated = True
+                if not ip.is_active or getattr(ip, "state", "") in ("INACTIVE", "REMOVED"):
+                    ip.is_active = True
+                    ip.state = "REACTIVATED"
+                    updated = True
+                    emit_event("IP_REACTIVATED", target=target, asset_type="IP", asset_id=ip.id,
+                               asset_value=val, source="dnsx", evidence={"hostname": host})
+                ip.last_seen = timezone.now()
+                ip.save(update_fields=["source_hostnames", "last_seen"] + (["state", "is_active"] if updated else []))
             Subdomain.objects.filter(target=target, hostname=host).update(
                 dns_status="resolved", last_seen=timezone.now())
     return new
@@ -147,16 +178,53 @@ def ingest_ports(target, entries):
         proto = e.get("protocol", "tcp")
         p, created = Port.objects.get_or_create(
             target=target, ip=ip, port=int(port), protocol=proto,
-            defaults={"state": "open", "service": e.get("service", "")})
+            defaults={"state": "open", "service": e.get("service", ""),
+                      "product": e.get("product", ""), "version": e.get("version", ""),
+                      "banner": e.get("banner", "")})
         if created:
             new += 1
+            p.state = "DISCOVERED"
+            p.save(update_fields=["state"])
             _asset(target, "PORT", f"{ip}:{port}/{proto}", {})
             emit_event("NEW_OPEN_PORT", target=target, asset_type="PORT", asset_id=p.id,
                        asset_value=f"{ip}:{port}", source="naabu",
-                       evidence={"protocol": proto, "service": e.get("service", "")}, severity="MEDIUM")
+                       evidence={"protocol": proto, "service": e.get("service", ""),
+                                 "product": e.get("product", ""), "version": e.get("version", "")},
+                       severity="MEDIUM",
+                       new_state={"ip": ip, "port": port, "service": e.get("service", "")})
         else:
-            p.last_seen = timezone.now()
-            p.save(update_fields=["last_seen"])
+            diffs = {}
+            if e.get("service") and p.service != e["service"]:
+                diffs["service"] = [p.service, e["service"]]
+                p.service = e["service"]
+            if e.get("product") and getattr(p, "product", "") != e["product"]:
+                diffs["product"] = [getattr(p, "product", ""), e["product"]]
+                p.product = e["product"]
+            if e.get("version") and getattr(p, "version", "") != e["version"]:
+                diffs["version"] = [getattr(p, "version", ""), e["version"]]
+                p.version = e["version"]
+            if e.get("banner") and getattr(p, "banner", "") != e["banner"]:
+                diffs["banner"] = [getattr(p, "banner", "")[:200], e["banner"][:200]]
+                p.banner = e["banner"]
+            if getattr(p, "state", "") in ("INACTIVE", "REMOVED", "closed"):
+                p.state = "REACTIVATED"
+                diffs["reactivated"] = True
+            elif p.state == "closed":
+                p.state = "REACTIVATED"
+                diffs["reactivated"] = True
+            if diffs:
+                from django.utils import timezone as _tz
+                p.last_changed = _tz.now()
+                p.last_seen = _tz.now()
+                p.save()
+                etype = "PORT_SERVICE_CHANGED" if ("service" in diffs or "product" in diffs) else ("PORT_BANNER_CHANGED" if "banner" in diffs else "PORT_STATE_CHANGED")
+                emit_event(etype, target=target, asset_type="PORT", asset_id=p.id,
+                           asset_value=f"{ip}:{port}", source="naabu",
+                           evidence={"changes": diffs, "protocol": proto},
+                           old_state={}, new_state=diffs)
+            else:
+                p.last_seen = timezone.now()
+                p.save(update_fields=["last_seen"])
     # PORT_CLOSED detection happens in reconciliation (stale ports not re-observed)
     return new
 
@@ -180,37 +248,68 @@ def ingest_http(target, entries):
         elif isinstance(e.get("technologies"), list):
             techs = e["technologies"]
         server = e.get("webserver") or e.get("server") or ""
+        from services.http_fingerprint import http_fingerprint, normalize_http_state
+        entry = dict(e)
+        entry.update({"url": url, "host": host, "status_code": status, "title": title,
+                      "server": server, "technologies": techs})
+        fp = http_fingerprint(entry)
+        norm = normalize_http_state(entry)
         svc, created = HTTPService.objects.get_or_create(
             target=target, url=url,
             defaults={"host": host, "port": e.get("port", 443), "scheme": e.get("scheme", "https"),
                       "status_code": status, "title": title, "server": server,
-                      "content_type": e.get("content_type", ""), "ip": e.get("ip", e.get("host_ip", "")),
-                      "technologies": techs, "tls_info": e.get("tls", {}),
-                      "redirect_chain": e.get("redirect_chain", [])})
+                      "content_type": e.get("content_type", ""), "content_length": e.get("content_length"),
+                      "ip": e.get("ip", e.get("host_ip", "")),
+                      "technologies": techs, "tls_info": e.get("tls", e.get("tls_info", {})),
+                      "redirect_chain": e.get("redirect_chain", []),
+                      "fingerprint": fp, "state": "DISCOVERED"})
         if created:
             new += 1
             _asset(target, "HTTP_SERVICE", url, {"status": status})
             emit_event("NEW_HTTP_SERVICE", target=target, asset_type="HTTP_SERVICE",
                        asset_id=svc.id, asset_value=url, source="httpx",
-                       evidence={"status": status, "title": title, "server": server})
+                       evidence={"status": status, "title": title, "server": server,
+                                 "fingerprint": fp, "ip": svc.ip},
+                       new_state=norm)
             for t in techs if isinstance(techs, list) else []:
                 name = t if isinstance(t, str) else t.get("name", "")
                 if name:
                     ingest_technology(target, url, name, "", 0.6, f"httpx: {url}", "httpx")
         else:
-            diffs = {}
-            if status and svc.status_code != status:
-                diffs["status_code"] = [svc.status_code, status]
+            if getattr(svc, "state", "") in ("INACTIVE", "REMOVED"):
+                svc.state = "REACTIVATED"
+                svc.fingerprint = fp
+                svc.last_changed = timezone.now()
+                svc.save()
+                emit_event("HTTP_SERVICE_REACTIVATED", target=target, asset_type="HTTP_SERVICE",
+                           asset_id=svc.id, asset_value=url, source="httpx",
+                           evidence={"fingerprint": fp})
+                changed += 1
+            elif svc.fingerprint != fp:
+                old_state = {"status_code": svc.status_code, "title": svc.title,
+                             "server": svc.server, "ip": svc.ip,
+                             "content_type": svc.content_type,
+                             "technologies": svc.technologies,
+                             "redirect_chain": svc.redirect_chain,
+                             "fingerprint": svc.fingerprint}
                 svc.status_code = status
-            if title and svc.title != title:
-                diffs["title"] = [svc.title, title]
                 svc.title = title
-            if diffs:
+                svc.server = server
+                svc.content_type = e.get("content_type", svc.content_type)
+                if e.get("content_length") is not None:
+                    svc.content_length = e.get("content_length")
+                svc.ip = e.get("ip", e.get("host_ip", svc.ip))
+                svc.technologies = techs
+                svc.tls_info = e.get("tls", e.get("tls_info", svc.tls_info))
+                svc.redirect_chain = e.get("redirect_chain", svc.redirect_chain)
+                svc.fingerprint = fp
                 svc.last_changed = timezone.now()
                 svc.save()
                 changed += 1
                 emit_event("HTTP_SERVICE_CHANGED", target=target, asset_type="HTTP_SERVICE",
-                           asset_id=svc.id, asset_value=url, source="httpx", evidence={"changes": diffs})
+                           asset_id=svc.id, asset_value=url, source="httpx",
+                           evidence={"fingerprint": fp, "ip": svc.ip},
+                           old_state=old_state, new_state=norm)
             else:
                 svc.last_seen = timezone.now()
                 svc.save(update_fields=["last_seen"])
@@ -280,6 +379,7 @@ def ingest_js(target, js_url, content: bytes | str, source="httpx"):
         return js, "NEW_JS"
     if js.sha256 != digest:
         old = js.sha256
+        old_routes, old_deps = set(js.routes or []), set(js.dependencies or [])
         js.sha256 = digest
         js.size = len(raw)
         js.content = beautify(text)
@@ -290,9 +390,24 @@ def ingest_js(target, js_url, content: bytes | str, source="httpx"):
         js.save()
         JavaScriptVersion.objects.create(js=js, sha256=digest, size=len(raw), content=beautify(text))
         _store_js_findings(js, text, source)
-        emit_event("JS_CHANGED", target=target, asset_type="JS_FILE", asset_id=js.id,
+        ev, _ = emit_event("JS_CHANGED", target=target, asset_type="JS_FILE", asset_id=js.id,
                    asset_value=js_url, source=source, severity="MEDIUM",
-                   evidence={"old_sha256": old, "new_sha256": digest, "size": len(raw)})
+                   evidence={"old_sha256": old, "new_sha256": digest, "size": len(raw)},
+                   old_state={"sha256": old}, new_state={"sha256": digest, "size": len(raw)})
+        # TASK-025 semantic children (correlated via parent_event)
+        try:
+            for r in (set(js.routes or []) - old_routes):
+                emit_event("NEW_JS_ENDPOINT", target=target, asset_type="JS_FILE", asset_id=js.id,
+                           asset_value=f"{js_url} -> {r}", source=source,
+                           evidence={"route": r, "js_url": js_url}, parent_event=ev,
+                           correlation_id=ev.correlation_id if ev else "")
+            for d in (set(js.dependencies or []) - old_deps):
+                emit_event("NEW_JS_LIBRARY", target=target, asset_type="JS_FILE", asset_id=js.id,
+                           asset_value=f"{js_url} -> {d}", source=source,
+                           evidence={"library": d, "js_url": js_url}, parent_event=ev,
+                           correlation_id=ev.correlation_id if ev else "")
+        except Exception:
+            pass
         return js, "JS_CHANGED"
     js.last_seen = timezone.now()
     js.save(update_fields=["last_seen"])
@@ -306,11 +421,20 @@ def _store_js_findings(js, text, source):
     from services.correlation.jsintel import extract_secret_candidates
 
     for c in extract_secret_candidates(text):
-        JavaScriptFinding.objects.get_or_create(
+        f, created = JavaScriptFinding.objects.get_or_create(
             js=js, finding_type=c["type"], location="body",
-            defaults={"evidence_preview": (c["match_preview"] or "") + " (redacted)",
+            defaults={"target": js.target,
+                      "evidence_preview": (c["match_preview"] or "") + " (redacted)",
                       "evidence_full": c.get("full", "")[:2000], "source_tool": source,
                       "confidence": "candidate", "status": "candidate"})
+        if created:
+            try:
+                emit_event("NEW_JS_SECRET_CANDIDATE", target=js.target, asset_type="JS_FILE",
+                           asset_id=js.id, asset_value=f"{js.js_url} [{c['type']}]",
+                           source=source, severity="HIGH",
+                           evidence={"secret_type": c["type"], "js_url": js.js_url})
+            except Exception:
+                pass
 
 
 def ingest_technology(target, asset_value, product, version="", confidence=0.6, evidence="", source=""):

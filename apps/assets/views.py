@@ -1,4 +1,5 @@
-"""Asset inventory list/detail views with search, filters, pagination."""
+"""Asset inventory list/detail views with search, filters, pagination (target-scoped)."""
+from django.core.exceptions import PermissionDenied
 from django.core.paginator import Paginator
 from django.shortcuts import get_object_or_404, render
 
@@ -48,7 +49,15 @@ def asset_detail(request, pk):
     from .models import Asset
 
     a = get_object_or_404(Asset, pk=pk)
+    _deny_on_context_mismatch(request, a)
     return render(request, "assets/detail.html", {"asset": a})
+
+
+def _deny_on_context_mismatch(request, obj):
+    """TASK-042/078: when caller supplies explicit target context, enforce it server-side."""
+    ctx = request.GET.get("target", "")
+    if ctx and str(getattr(obj, "target_id", "")) != str(ctx):
+        raise PermissionDenied("cross-target access denied")
 
 
 @require_viewer
@@ -148,6 +157,7 @@ def js_scan_detail(request, pk):
     from apps.jobs.models import JSAnalysisJob
 
     js = get_object_or_404(JavaScriptAsset, pk=pk)
+    _deny_on_context_mismatch(request, js)
     jobs = js.analysis_jobs.order_by("-created_at")[:10]
     job_id = request.GET.get("job", "")
     job = None
@@ -163,6 +173,7 @@ def js_scan_detail(request, pk):
 @require_viewer
 def js_diff(request, pk):
     js = get_object_or_404(JavaScriptAsset, pk=pk)
+    _deny_on_context_mismatch(request, js)
     versions = list(js.versions.all()[:10])
     diff_lines = []
     if len(versions) >= 2:

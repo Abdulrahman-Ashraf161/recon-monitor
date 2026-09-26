@@ -11,29 +11,36 @@
 <div class="layout">
 <aside class="sidebar">
 <div class="brand">◈ RECON<span>MONITOR</span></div>
+<form method="get" action="" class="target-picker">
+<label for="target">Target</label>
+<select name="target" id="target" onchange="this.form.submit()">
+<option value="">All targets (overview)</option>
+{% for t in all_targets %}<option value="{{ t.id }}" {% if active_target and t.id == active_target.id %}selected{% endif %}>{{ t.root_domain }}</option>{% endfor %}
+</select>
+</form>
 <nav>
 <div class="nav-sec">Main</div>
-<a href="/dashboard/">Dashboard</a>
+<a href="/dashboard/{% if active_target %}?target={{ active_target.id }}{% endif %}">Dashboard</a>
 <div class="nav-sec">Targets</div>
 <a href="/targets/">All Targets</a>
 <a href="/targets/add/">Add Target</a>
 <div class="nav-sec">Attack Surface</div>
-<a href="/assets/">Assets</a>
-<a href="/subdomains/">Subdomains</a>
-<a href="/assets/ips/">IPs</a>
-<a href="/ports/">Ports</a>
-<a href="/http/">HTTP Services</a>
-<a href="/urls/">URLs</a>
-<a href="/apis/">APIs</a>
+<a href="/assets/{% if active_target %}?target={{ active_target.id }}{% endif %}">Assets</a>
+<a href="/subdomains/{% if active_target %}?target={{ active_target.id }}{% endif %}">Subdomains</a>
+<a href="/assets/ips/{% if active_target %}?target={{ active_target.id }}{% endif %}">IPs</a>
+<a href="/ports/{% if active_target %}?target={{ active_target.id }}{% endif %}">Ports</a>
+<a href="/http/{% if active_target %}?target={{ active_target.id }}{% endif %}">HTTP Services</a>
+<a href="/urls/{% if active_target %}?target={{ active_target.id }}{% endif %}">URLs</a>
+<a href="/apis/{% if active_target %}?target={{ active_target.id }}{% endif %}">APIs</a>
 <div class="nav-sec">Intelligence</div>
-<a href="/javascript/">JavaScript</a>
-<a href="/technologies/">Technologies</a>
-<a href="/cves/">CVEs</a>
-<a href="/findings/">Findings</a>
+<a href="/javascript/{% if active_target %}?target={{ active_target.id }}{% endif %}">JavaScript</a>
+<a href="/technologies/{% if active_target %}?target={{ active_target.id }}{% endif %}">Technologies</a>
+<a href="/cves/{% if active_target %}?target={{ active_target.id }}{% endif %}">CVEs</a>
+<a href="/findings/{% if active_target %}?target={{ active_target.id }}{% endif %}">Findings</a>
 <div class="nav-sec">Monitoring</div>
-<a href="/changes/">What's New</a>
-<a href="/events/">Live Events</a>
-<a href="/jobs/">Jobs</a>
+<a href="/changes/{% if active_target %}?target={{ active_target.id }}{% endif %}">What's New</a>
+<a href="/events/{% if active_target %}?target={{ active_target.id }}{% endif %}">Live Events</a>
+<a href="/jobs/{% if active_target %}?target={{ active_target.id }}{% endif %}">Jobs</a>
 <a href="/logs/">Logs</a>
 <a href="/monitoring/">Monitoring</a>
 <a href="/monitoring/workers/">Workers</a>
@@ -41,7 +48,7 @@
 <a href="/monitoring/exports/">Export History</a>
 <div class="nav-sec">System</div>
 <a href="/scope/">Scope</a>
-<a href="/settings/system/">Tools & System</a>
+<a href="/settings/system/">Tools &amp; System</a>
 <a href="/alerts/">Alerts</a>
 <a href="/audit/">Audit Log</a>
 <a href="/settings/">Settings</a>
@@ -52,6 +59,7 @@
 </aside>
 <main class="main">
 <header class="topbar">
+{% if active_target %}<div class="ctx">Target: <strong>{{ active_target.root_domain }}</strong></div>{% else %}<div class="ctx muted">All targets (select one for isolation)</div>{% endif %}
 <form action="/search/" method="get" class="search"><input name="q" placeholder="Search assets, IPs, URLs, CVEs…" value="{{ q|default:'' }}"><button>Search</button></form>
 <div id="live-dot" class="live-dot" title="websocket">● LIVE</div>
 </header>

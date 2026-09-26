@@ -22,3 +22,12 @@ table{width:100%;border-collapse:collapse}th,td{padding:8px 10px;border-bottom:1
 pre.diff{background:#0a0f14;padding:12px;border-radius:8px;overflow:auto;font-size:12px}.msgs .msg{background:var(--panel2);border:1px solid var(--border);padding:8px;border-radius:8px;margin:8px 0}
 form.stacked label{display:block;margin:8px 0 2px;color:var(--mut)}form.stacked input,form.stacked select,form.stacked textarea{width:100%;max-width:560px}
 .inline{display:inline}.row-actions{display:flex;gap:6px}
+.target-picker{margin:6px 0 4px}.target-picker label{font-size:11px;color:var(--mut);text-transform:uppercase}.target-picker select{width:100%;margin-top:4px}
+.ctx{font-size:13px;color:var(--txt)}.ctx.muted{color:var(--mut)}
+.skel{background:linear-gradient(90deg,var(--panel2) 25%,var(--border) 50%,var(--panel2) 75%);background-size:200% 100%;animation:sk 1.2s infinite;border-radius:8px;min-height:18px}
+@keyframes sk{to{background-position:-200% 0}}
+.empty{padding:28px;text-align:center;color:var(--mut);border:1px dashed var(--border);border-radius:12px;margin:12px 0}
+.err{padding:14px;border:1px solid var(--crit);border-radius:10px;background:rgba(239,68,68,.08);margin:12px 0}
+.timeline{border-left:2px solid var(--border);margin-left:8px;padding-left:16px}
+.timeline .t-ev{margin:10px 0}
+@media(max-width:900px){.layout{flex-direction:column}.sidebar{width:100%;height:auto;position:static}.cards{grid-template-columns:repeat(auto-fill,minmax(130px,1fr))}table{font-size:12px}}

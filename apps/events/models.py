@@ -4,22 +4,38 @@ from django.db import models
 
 class Event(models.Model):
     EVENT_TYPES = [
-        ("NEW_SUBDOMAIN", "New subdomain"), ("NEW_DNS_RECORD", "New DNS record"),
-        ("DNS_RECORD_CHANGED", "DNS record changed"), ("NEW_IP", "New IP"), ("IP_REMOVED", "IP removed"),
+        ("NEW_SUBDOMAIN", "New subdomain"), ("SUBDOMAIN_CHANGED", "Subdomain changed"),
+        ("NEW_DNS_RECORD", "New DNS record"),
+        ("DNS_RECORD_CHANGED", "DNS record changed"), ("DNS_RECORD_REMOVED", "DNS record removed"),
+        ("NEW_IP", "New IP"), ("IP_CHANGED", "IP changed"), ("IP_REMOVED", "IP removed"),
+        ("IP_REACTIVATED", "IP reactivated"),
         ("NEW_OPEN_PORT", "New open port"), ("PORT_CLOSED", "Port closed"),
-        ("PORT_STATE_CHANGED", "Port state changed"), ("NEW_HTTP_SERVICE", "New HTTP service"),
+        ("PORT_STATE_CHANGED", "Port state changed"), ("PORT_SERVICE_CHANGED", "Port service changed"),
+        ("PORT_BANNER_CHANGED", "Port banner changed"),
+        ("NEW_HTTP_SERVICE", "New HTTP service"),
         ("HTTP_SERVICE_CHANGED", "HTTP service changed"), ("HTTP_SERVICE_REMOVED", "HTTP service removed"),
-        ("NEW_URL", "New URL"), ("NEW_API_ENDPOINT", "New API endpoint"),
-        ("API_ENDPOINT_CHANGED", "API endpoint changed"), ("NEW_JS", "New JS"), ("JS_CHANGED", "JS changed"),
-        ("NEW_TECHNOLOGY", "New technology"), ("TECH_VERSION_CHANGED", "Tech version changed"),
-        ("TECHNOLOGY_REMOVED", "Technology removed"), ("NEW_CVE_CANDIDATE", "New CVE candidate"),
+        ("HTTP_SERVICE_REACTIVATED", "HTTP service reactivated"),
+        ("NEW_URL", "New URL"), ("URL_CHANGED", "URL changed"), ("URL_REMOVED", "URL removed"),
+        ("URL_REACTIVATED", "URL reactivated"),
+        ("NEW_API_ENDPOINT", "New API endpoint"),
+        ("API_ENDPOINT_CHANGED", "API endpoint changed"), ("API_ENDPOINT_REMOVED", "API removed"),
+        ("API_ENDPOINT_REACTIVATED", "API reactivated"),
+        ("NEW_JS", "New JS"), ("JS_CHANGED", "JS changed"), ("JS_REMOVED", "JS removed"),
+        ("JS_REACTIVATED", "JS reactivated"),
+        ("NEW_JS_ENDPOINT", "New JS endpoint"), ("NEW_JS_SECRET_CANDIDATE", "New JS secret candidate"),
+        ("NEW_JS_DEPENDENCY", "New JS dependency"), ("NEW_JS_LIBRARY", "New JS library"),
+        ("NEW_TECHNOLOGY", "New technology"), ("TECHNOLOGY_CHANGED", "Technology changed"),
+        ("TECH_VERSION_CHANGED", "Tech version changed"),
+        ("TECHNOLOGY_REMOVED", "Technology removed"), ("TECHNOLOGY_REACTIVATED", "Technology reactivated"),
+        ("NEW_CVE_CANDIDATE", "New CVE candidate"),
         ("CVE_STATUS_CHANGED", "CVE status changed"), ("CVE_VALIDATED", "CVE validated"),
         ("NEW_SECURITY_FINDING", "New security finding"), ("FINDING_CHANGED", "Finding changed"),
         ("FINDING_RESOLVED", "Finding resolved"), ("SCOPE_CHANGED", "Scope changed"),
-        ("AUTHORIZATION_EXPIRED", "Authorization expired"),         ("BASELINE_STARTED", "Baseline started"),
+        ("AUTHORIZATION_EXPIRED", "Authorization expired"), ("BASELINE_STARTED", "Baseline started"),
         ("BASELINE_COMPLETED", "Baseline completed"), ("JOB_FAILED", "Job failed"),
         ("JOB_STALLED", "Job stalled"), ("SUBDOMAIN_REMOVED", "Subdomain removed"),
-        ("URL_CHANGED", "URL changed"), ("JS_ANALYSIS_STARTED", "JS analysis started"),
+        ("SUBDOMAIN_REACTIVATED", "Subdomain reactivated"),
+        ("JS_ANALYSIS_STARTED", "JS analysis started"),
         ("JS_ANALYSIS_COMPLETED", "JS analysis completed"),
     ]
     SEV_CHOICES = [("INFO", "Info"), ("LOW", "Low"), ("MEDIUM", "Medium"), ("HIGH", "High"), ("CRITICAL", "Critical")]
@@ -34,7 +50,19 @@ class Event(models.Model):
     source = models.CharField(max_length=128, default="", blank=True)
     evidence = models.JSONField(default=dict, blank=True)
     fingerprint = models.CharField(max_length=128, unique=True, db_index=True)
+    # TASK-033 evidence + TASK-034 correlation + TASK-037 priority
+    scan_run = models.ForeignKey("jobs.ScanRun", null=True, blank=True, on_delete=models.SET_NULL, related_name="events")
+    old_state = models.JSONField(default=dict, blank=True)
+    new_state = models.JSONField(default=dict, blank=True)
+    correlation_id = models.CharField(max_length=64, default="", blank=True, db_index=True)
+    parent_event = models.ForeignKey("self", null=True, blank=True, on_delete=models.SET_NULL, related_name="children")
+    priority = models.CharField(max_length=16, default="LOW", db_index=True)
+    priority_reasons = models.JSONField(default=list, blank=True)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    @property
+    def target_id_safe(self):
+        return self.target_id
 
     class Meta:
         ordering = ["-created_at"]
@@ -60,6 +88,7 @@ class Alert(models.Model):
         (STATUS_DEDUPLICATED, "Deduplicated"),
     ]
     event = models.ForeignKey(Event, on_delete=models.CASCADE, related_name="alerts")
+    target = models.ForeignKey("targets.Target", null=True, blank=True, on_delete=models.CASCADE, related_name="alerts")
     channel = models.CharField(max_length=32, default="discord")
     status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_PENDING, db_index=True)
     payload_preview = models.TextField(default="", blank=True)

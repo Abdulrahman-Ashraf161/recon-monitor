@@ -7,10 +7,13 @@ class TargetForm(forms.ModelForm):
     class Meta:
         model = Target
         fields = ["name", "root_domain", "status", "authorization_status",
-                  "authorization_expires_at", "auth_warning_days", "scan_config"]
+                  "authorization_expires_at", "auth_warning_days", "scan_profile",
+                  "verify_tls", "scan_config"]
         widgets = {"authorization_expires_at": forms.DateTimeInput(attrs={"type": "datetime-local"})}
         help_texts = {
             "scan_config": 'Optional JSON. Example: {"ports": "80,443,8080,8443"}. Leave as {} for defaults.',
+            "scan_profile": "Passive=no touch / Balanced=default / Active=ports+content / Full=all.",
+            "verify_tls": "Verify TLS certificates (uncheck only for lab targets; shown in logs).",
         }
 
     def __init__(self, *args, **kwargs):

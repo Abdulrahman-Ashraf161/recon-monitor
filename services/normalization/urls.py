@@ -1,7 +1,15 @@
-"""URL normalization (raw_url + canonical_url) + API classification."""
-from urllib.parse import urlparse, urlunparse
+"""URL normalization (raw_url + canonical_url) + API classification (TASK-019/020).
 
-API_PATTERNS = ["/api/", "/api/v1/", "/api/v2/", "/graphql", "/rest/", "/swagger", "/openapi.json", "/v1/", "/v2/", "/wp-json/"]
+Normalization: scheme/host lowercase, default ports stripped, fragments dropped,
+percent-encoding normalized, trailing-slash handling, query params sorted so
+semantically identical URLs map to one asset.
+Classification uses path + content-type + headers + body signals, not path alone.
+"""
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse, unquote
+
+API_PATTERNS = ["/api/", "/api/v1/", "/api/v2/", "/graphql", "/rest/", "/swagger",
+                "/openapi.json", "/v1/", "/v2/", "/wp-json/", "/.well-known/openapi",
+                "/graphql/", "/gql"]
 
 
 def canonicalize_url(raw: str) -> str | None:
@@ -21,16 +29,49 @@ def canonicalize_url(raw: str) -> str | None:
     port = p.port
     default = {"http": 80, "https": 443}.get(scheme)
     netloc = host if (not port or port == default) else f"{host}:{port}"
-    path = p.path or "/"
-    query = p.query  # keep useful query params
-    return urlunparse((scheme, netloc, path, "", query, ""))
+    try:
+        path = unquote(p.path or "/")
+    except Exception:
+        path = p.path or "/"
+    if not path.startswith("/"):
+        path = "/" + path
+    # sort query params for stable identity (TASK-019)
+    try:
+        qsl = parse_qsl(p.query, keep_blank_values=True)
+        query = urlencode(sorted(qsl))
+    except Exception:
+        query = p.query
+    return urlunparse((scheme, netloc, path, "", query, ""))  # fragment always dropped
 
 
-def classify_api(url: str) -> tuple[bool, str, list]:
-    low = url.lower()
+def classify_api(url: str, content_type: str = "", headers: dict | None = None,
+                 body_hint: str = "") -> tuple[bool, str, list]:
+    """Evidence-based API classification (TASK-020)."""
+    low = (url or "").lower()
+    ct = (content_type or "").lower()
+    hdrs = {str(k).lower(): str(v).lower() for k, v in (headers or {}).items()}
+    body = (body_hint or "").lower()
+    signals = []
     for pat in API_PATTERNS:
         if pat in low:
-            api_type = "GraphQL" if "graphql" in low else ("OpenAPI/Swagger" if ("swagger" in low or "openapi" in low) else "REST")
-            auth_hints = [h for h in ("auth", "login", "token", "admin", "internal") if h in low]
-            return True, api_type, auth_hints
-    return False, "", []
+            signals.append(f"path:{pat}")
+    if "application/json" in ct and ("/api" in low or "graphql" in low or "rest" in low):
+        signals.append("content-type:json+path")
+    if "graphql" in body or '"data"' in body and '"errors"' in body:
+        signals.append("body:graphql-shape")
+    if "swagger" in body or "openapi" in body:
+        signals.append("body:openapi-schema")
+    if "x-api-version" in hdrs or "x-version" in hdrs:
+        signals.append("header:version")
+    if not signals:
+        return False, "", []
+    if "graphql" in low or "body:graphql-shape" in signals:
+        api_type = "GraphQL"
+    elif "swagger" in low or "openapi" in low or "body:openapi-schema" in signals:
+        api_type = "OpenAPI/Swagger"
+    elif "/v1/" in low or "/v2/" in low or "header:version" in signals:
+        api_type = "Versioned REST"
+    else:
+        api_type = "REST"
+    auth_hints = [h for h in ("auth", "login", "token", "admin", "internal", "oauth", "jwt") if h in low]
+    return True, api_type, auth_hints

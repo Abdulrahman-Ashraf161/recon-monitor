@@ -90,6 +90,26 @@ class JobSerializer(serializers.ModelSerializer):
 class AuthViewSet(viewsets.ReadOnlyModelViewSet):
     permission_classes = [IsAuthenticated]
 
+    def get_queryset(self):
+        qs = super().get_queryset()
+        # TASK-079: no unrestricted cross-target export; when target param is
+        # supplied it is authoritative and validated server-side.
+        target = self.request.query_params.get("target")
+        if target:
+            try:
+                tid = int(target)
+            except ValueError:
+                from rest_framework.exceptions import ValidationError as _VE
+                raise _VE("invalid target id")
+            model = qs.model
+            if any(f.name == "target" for f in model._meta.get_fields()):
+                return qs.filter(target_id=tid)
+            if model.__name__ == "JavaScriptFinding":
+                return qs.filter(js__target_id=tid)
+            if model.__name__ == "Alert":
+                return qs.filter(event__target_id=tid)
+        return qs
+
 
 class TargetViewSet(AuthViewSet):
     queryset = Target.objects.all()

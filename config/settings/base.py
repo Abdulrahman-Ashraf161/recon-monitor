@@ -87,6 +87,7 @@ TEMPLATES = [
                 "django.template.context_processors.request",
                 "django.contrib.auth.context_processors.auth",
                 "django.contrib.messages.context_processors.messages",
+                "apps.core.context_processors.target_context",
             ],
         },
     },
@@ -195,3 +196,18 @@ ARTIFACTS_DIR = DATA_DIR / "artifacts"
 SECURE_BROWSER_XSS_FILTER = True
 SESSION_COOKIE_HTTPONLY = True
 CSRF_COOKIE_HTTPONLY = False
+
+
+# --- Structured logging (TASK-071): never log secrets ---
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "filters": {"context_defaults": {"()": "django.utils.log.CallbackFilter", "callback": lambda r: (all(hasattr(r, k) for k in ("target_id", "scan_run_id", "task_id", "operation", "status")) or [setattr(r, k, "-") for k in ("target_id", "scan_run_id", "task_id", "operation", "status") if not hasattr(r, k)], True)[-1]}},
+    "formatters": {
+        "structured": {
+            "format": "%(asctime)s %(levelname)s %(name)s target=%(target_id)s scan=%(scan_run_id)s task=%(task_id)s op=%(operation)s status=%(status)s %(message)s",
+        },
+    },
+    "handlers": {"console": {"class": "logging.StreamHandler", "formatter": "structured", "filters": ["context_defaults"]}},
+    "root": {"handlers": ["console"], "level": "INFO"},
+}

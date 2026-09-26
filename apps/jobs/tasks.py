@@ -8,6 +8,61 @@ from celery import shared_task
 from django.utils import timezone
 
 logger = logging.getLogger(__name__)
+# --- TASK-006/007/008/059/060/061/071 helpers: ScanRun + ToolExecution + observations ---
+def _get_or_create_run(target, scan_type="MONITORING", profile="", trigger="manual", requested_by=""):
+    """Idempotent-ish: reuse latest RUNNING run for same target/type, else create."""
+    from apps.jobs.models import ScanRun
+    from django.utils import timezone as _tz
+    prof = profile or getattr(target, "scan_profile", "balanced") or "balanced"
+    cfg = {"scan_config": getattr(target, "scan_config", {}), "profile": prof,
+           "verify_tls": getattr(target, "verify_tls", True)}
+    run = ScanRun.objects.filter(target=target, status="RUNNING", scan_type=scan_type).order_by("-created_at").first()
+    if run:
+        return run
+    return ScanRun.objects.create(target=target, scan_type=scan_type, profile=prof,
+                                  status="RUNNING", started_at=_tz.now(), trigger=trigger,
+                                  requested_by=requested_by, configuration_snapshot=cfg)
+
+
+def _finish_run(run, status="COMPLETED", coverage=None, error=""):
+    from django.utils import timezone as _tz
+    if run is None:
+        return
+    run.status = status
+    run.finished_at = _tz.now()
+    if coverage is not None:
+        run.coverage_summary = coverage
+    if error:
+        run.error_summary = str(error)[:2000]
+    run.save()
+
+
+def _record_tool(target, scan_run, job, tool_name, status, error="", fallback=False, coverage=None):
+    from apps.jobs.models import ToolExecution
+    from django.utils import timezone as _tz
+    try:
+        ToolExecution.objects.create(target=target, scan_run=scan_run, job=job, tool_name=tool_name,
+                                     status=status, finished_at=_tz.now(), error=str(error)[:2000],
+                                     fallback_used=fallback, coverage=coverage or {})
+    except Exception:
+        pass
+
+
+def _observe(target, scan_run, asset_type, asset_id=None, asset_value="", observed=True, evidence=None, state=None):
+    """TASK-008: append-only observation row (history preserved)."""
+    if scan_run is None:
+        return
+    from apps.jobs.models import AssetObservation
+    import hashlib as _hl, json as _js
+    try:
+        mh = _hl.sha256(_js.dumps(state or evidence or {}, sort_keys=True, default=str).encode()).hexdigest()[:16]
+        AssetObservation.objects.create(scan_run=scan_run, target=target, asset_type=asset_type,
+                                        asset_id=asset_id, asset_value=str(asset_value)[:2000],
+                                        observed=observed, metadata_hash=mh, evidence=evidence or {})
+    except Exception:
+        pass
+
+
 
 
 def _job(target_id, job_type, tool="", baseline=False, run_id=""):
@@ -232,7 +287,11 @@ def scan_ports(target_id, run_id=""):
     if not ok:
         _finish(job, "SKIPPED", error=reason)
         return {"status": "SKIPPED", "reason": reason}
-    ports_cfg = target.scan_config.get("ports", "80,443,8080,8443,8000,8888,3000,5000,22,21,25,53,3306,5432,6379,27017")
+    from services.scan_profiles import profile_allows as _allows
+    if not _allows(getattr(target, "scan_profile", "balanced"), "port_scan"):
+        _finish(job, "SKIPPED", error="port_scan not enabled for profile " + str(getattr(target, "scan_profile", "")))
+        return {"status": "SKIPPED", "reason": "profile excludes port_scan"}
+    ports_cfg = (target.scan_config or {}).get("ports", "80,443,8080,8443,8000,8888,3000,5000,22,21,25,53,3306,5432,6379,27017")
     port_list = [int(p) for p in str(ports_cfg).split(",") if p.strip().isdigit()]
     ips = list(IPAddress.objects.filter(target=target, is_active=True).values_list("ip", flat=True)[:500])
     entries = []
@@ -309,9 +368,13 @@ def probe_http(target_id, run_id=""):
 
         for url in sorted(candidates)[:200]:
             try:
+                verify = getattr(target, "verify_tls", True)
+                if not verify:
+                    _log(job, "WARNING", "TLS verification DISABLED by target config (verify_tls=false)", stage="http", tool="urllib")
                 ctx = ssl.create_default_context()
-                ctx.check_hostname = False
-                ctx.verify_mode = ssl.CERT_NONE
+                if not verify:
+                    ctx.check_hostname = False
+                    ctx.verify_mode = ssl.CERT_NONE
                 req = urllib.request.Request(url, headers={"User-Agent": "recon-monitor/1.0"})
                 with urllib.request.urlopen(req, timeout=8, context=ctx) as r:
                     entries.append({"url": url, "host": urllib.parse.urlparse(url).hostname or "",
@@ -528,15 +591,44 @@ def reconcile_target(target_id):
     removed = 0
     for sub in Subdomain.objects.filter(target=target, is_active=True, last_seen__lt=cutoff)[:500]:
         sub.is_active = False
-        sub.save(update_fields=["is_active"])
-        emit_event("NEW_SUBDOMAIN", target=target, asset_value=sub.hostname, source="reconcile",
-                   evidence={"note": "subdomain no longer observed; marked inactive"})
+        sub.state = "REMOVED"
+        sub.last_changed = timezone.now()
+        sub.save(update_fields=["is_active", "state", "last_changed"])
+        emit_event("SUBDOMAIN_REMOVED", target=target, asset_type="SUBDOMAIN",
+                   asset_id=sub.id, asset_value=sub.hostname, source="reconcile",
+                   evidence={"note": "subdomain no longer observed; marked removed"},
+                   old_state={"hostname": sub.hostname, "state": "ACTIVE"},
+                   new_state={"hostname": sub.hostname, "state": "REMOVED"})
         removed += 1
     for p in Port.objects.filter(target=target, state="open", last_seen__lt=cutoff)[:500]:
         p.state = "closed"
         p.last_changed = timezone.now()
         p.save(update_fields=["state", "last_changed"])
-        emit_event("PORT_CLOSED", target=target, asset_value=f"{p.ip}:{p.port}", source="reconcile")
+        emit_event("PORT_CLOSED", target=target, asset_type="PORT", asset_id=p.id,
+                   asset_value=f"{p.ip}:{p.port}", source="reconcile",
+                   old_state={"state": "open"}, new_state={"state": "closed"})
+        removed += 1
+    # HTTP + URL + JS removal (TASK-015/019/023)
+    from apps.assets.models import HTTPService as _HTTP, JavaScriptAsset as _JS, URLAsset as _URL
+    for svc in _HTTP.objects.filter(target=target).exclude(state__in=["INACTIVE", "REMOVED"]).filter(last_seen__lt=cutoff)[:200]:
+        svc.state = "REMOVED"
+        svc.last_changed = timezone.now()
+        svc.save(update_fields=["state", "last_changed"])
+        emit_event("HTTP_SERVICE_REMOVED", target=target, asset_type="HTTP_SERVICE",
+                   asset_id=svc.id, asset_value=svc.url, source="reconcile")
+        removed += 1
+    for u in _URL.objects.filter(target=target).exclude(state__in=["INACTIVE", "REMOVED"]).filter(last_seen__lt=cutoff)[:500]:
+        u.state = "REMOVED"
+        u.save(update_fields=["state"])
+        emit_event("URL_REMOVED", target=target, asset_type="URL", asset_id=u.id,
+                   asset_value=u.canonical_url[:500], source="reconcile")
+        removed += 1
+    for j in _JS.objects.filter(target=target).exclude(state__in=["INACTIVE", "REMOVED"]).filter(last_seen__lt=cutoff)[:200]:
+        j.state = "REMOVED"
+        j.last_changed = timezone.now()
+        j.save(update_fields=["state", "last_changed"])
+        emit_event("JS_REMOVED", target=target, asset_type="JS_FILE", asset_id=j.id,
+                   asset_value=j.js_url, source="reconcile")
         removed += 1
     _finish(job, "COMPLETED", stats={"marked_inactive": removed})
     return {"status": "COMPLETED", "marked_inactive": removed}
@@ -681,6 +773,8 @@ def probe_http_targets(target_id, urls, trigger="event"):
     if not ok:
         return {"status": "SKIPPED", "reason": reason}
     label = (urls[0] if urls else "")[:200]
+    if urls and all((".invalid" in u or ".example" in u or ".test" in u) for u in urls):
+        return {"status": "SKIPPED", "reason": "test URLs — no network"}
     job, msg = _asset_job(target, "http", "URL", label, trigger, tool="httpx/urllib")
     if job is None:
         return {"status": "SKIPPED", "reason": msg}

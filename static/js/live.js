@@ -1,6 +1,13 @@
-// Live event/job feed via Django Channels WebSocket. Prepends to #live-feed if present.
+// Live event/job feed (TASK-043): target-scoped socket when ?target= is present,
+// so a Target-A page never receives Target-B events.
 (function () {
   var dot = document.getElementById("live-dot");
+  function targetId() {
+    try {
+      var m = location.search.match(/[?&]target=(\d+)/);
+      return m ? m[1] : null;
+    } catch (e) { return null; }
+  }
   function connect(path) {
     var proto = location.protocol === "https:" ? "wss" : "ws";
     var ws = new WebSocket(proto + "://" + location.host + path);
@@ -9,6 +16,9 @@
     ws.onmessage = function (ev) {
       try {
         var d = JSON.parse(ev.data);
+        // client-side guard (defense in depth; server already isolates)
+        var tid = targetId();
+        if (tid && d.target_id && String(d.target_id) !== String(tid)) return;
         var feed = document.getElementById("live-feed");
         if (feed) {
           var div = document.createElement("div");
@@ -21,5 +31,7 @@
       } catch (e) {}
     };
   }
-  connect("/ws/events/");
+  var tid = targetId();
+  if (tid) connect("/ws/targets/" + tid + "/");
+  else connect("/ws/events/");
 })();

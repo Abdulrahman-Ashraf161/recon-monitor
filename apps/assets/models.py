@@ -1,5 +1,14 @@
-"""Central asset inventory models."""
+"""Central asset inventory models (target-isolated, explicit lifecycle)."""
+from django.core.exceptions import ValidationError
 from django.db import models
+
+
+ASSET_STATES = [
+    ("DISCOVERED", "Discovered"), ("ACTIVE", "Active"),
+    ("SUSPECTED_INACTIVE", "Suspected inactive"), ("INACTIVE", "Inactive"),
+    ("REMOVED", "Removed"), ("REACTIVATED", "Reactivated"), ("UNKNOWN", "Unknown"),
+]
+PRIORITY_CHOICES = [(s, s) for s in ("CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO")]
 
 
 class Asset(models.Model):
@@ -49,6 +58,10 @@ class Subdomain(models.Model):
     ip_addresses = models.JSONField(default=list, blank=True)
     wildcard_suspect = models.BooleanField(default=False)
     is_active = models.BooleanField(default=True, db_index=True)
+    state = models.CharField(max_length=24, default="ACTIVE", db_index=True)
+    priority = models.CharField(max_length=16, default="LOW", db_index=True)
+    priority_reasons = models.JSONField(default=list, blank=True)
+    fingerprint = models.CharField(max_length=64, default="", blank=True, db_index=True)
     first_seen = models.DateTimeField(auto_now_add=True)
     last_seen = models.DateTimeField(auto_now=True)
     last_changed = models.DateTimeField(null=True, blank=True)
@@ -83,6 +96,9 @@ class IPAddress(models.Model):
     version = models.IntegerField(default=4)
     source_hostnames = models.JSONField(default=list, blank=True)
     is_active = models.BooleanField(default=True, db_index=True)
+    state = models.CharField(max_length=24, default="ACTIVE", db_index=True)
+    priority = models.CharField(max_length=16, default="LOW", db_index=True)
+    priority_reasons = models.JSONField(default=list, blank=True)
     first_seen = models.DateTimeField(auto_now_add=True)
     last_seen = models.DateTimeField(auto_now=True)
 
@@ -100,6 +116,14 @@ class Port(models.Model):
     protocol = models.CharField(max_length=8, default="tcp")
     state = models.CharField(max_length=16, default="open", db_index=True)
     service = models.CharField(max_length=128, default="", blank=True)
+    product = models.CharField(max_length=256, default="", blank=True)
+    version = models.CharField(max_length=128, default="", blank=True)
+    banner = models.TextField(default="", blank=True)
+    state = models.CharField(max_length=16, default="open", db_index=True)
+    lifecycle = models.CharField(max_length=24, default="ACTIVE", db_index=True)
+    priority = models.CharField(max_length=16, default="LOW", db_index=True)
+    priority_reasons = models.JSONField(default=list, blank=True)
+    fingerprint = models.CharField(max_length=64, default="", blank=True, db_index=True)
     first_seen = models.DateTimeField(auto_now_add=True)
     last_seen = models.DateTimeField(auto_now=True)
     last_changed = models.DateTimeField(null=True, blank=True)
@@ -127,6 +151,10 @@ class HTTPService(models.Model):
     redirect_chain = models.JSONField(default=list, blank=True)
     technologies = models.JSONField(default=list, blank=True)
     ip = models.CharField(max_length=64, default="", blank=True)
+    fingerprint = models.CharField(max_length=64, default="", blank=True, db_index=True)
+    state = models.CharField(max_length=24, default="ACTIVE", db_index=True)
+    priority = models.CharField(max_length=16, default="LOW", db_index=True)
+    priority_reasons = models.JSONField(default=list, blank=True)
     first_seen = models.DateTimeField(auto_now_add=True)
     last_seen = models.DateTimeField(auto_now=True)
     last_changed = models.DateTimeField(null=True, blank=True)
@@ -149,6 +177,9 @@ class URLAsset(models.Model):
     content_type = models.CharField(max_length=256, default="", blank=True)
     source = models.CharField(max_length=64, default="", blank=True, db_index=True)
     is_api = models.BooleanField(default=False, db_index=True)
+    state = models.CharField(max_length=24, default="ACTIVE", db_index=True)
+    fingerprint = models.CharField(max_length=64, default="", blank=True, db_index=True)
+    priority = models.CharField(max_length=16, default="LOW", db_index=True)
     first_seen = models.DateTimeField(auto_now_add=True)
     last_seen = models.DateTimeField(auto_now=True)
 
@@ -170,6 +201,11 @@ class APIEndpoint(models.Model):
     content_type = models.CharField(max_length=256, default="", blank=True)
     auth_indicators = models.JSONField(default=list, blank=True)
     source = models.CharField(max_length=64, default="", blank=True)
+    path = models.CharField(max_length=2048, default="", blank=True)
+    version = models.CharField(max_length=64, default="", blank=True)
+    state = models.CharField(max_length=24, default="ACTIVE", db_index=True)
+    fingerprint = models.CharField(max_length=64, default="", blank=True, db_index=True)
+    priority = models.CharField(max_length=16, default="LOW", db_index=True)
     first_seen = models.DateTimeField(auto_now_add=True)
     last_seen = models.DateTimeField(auto_now=True)
 
@@ -191,6 +227,9 @@ class JavaScriptAsset(models.Model):
     routes = models.JSONField(default=list, blank=True)
     dependencies = models.JSONField(default=list, blank=True)
     secret_candidates = models.IntegerField(default=0)
+    state = models.CharField(max_length=24, default="ACTIVE", db_index=True)
+    priority = models.CharField(max_length=16, default="LOW", db_index=True)
+    priority_reasons = models.JSONField(default=list, blank=True)
     first_seen = models.DateTimeField(auto_now_add=True)
     last_seen = models.DateTimeField(auto_now=True)
     last_changed = models.DateTimeField(null=True, blank=True)
@@ -226,6 +265,7 @@ class JavaScriptFinding(models.Model):
         (STATUS_FALSE_POSITIVE, "False positive"), (STATUS_RESOLVED, "Resolved"),
         (STATUS_UNKNOWN, "Unknown"),
     ]
+    target = models.ForeignKey("targets.Target", on_delete=models.CASCADE, related_name="js_findings", null=True, blank=True)
     js = models.ForeignKey(JavaScriptAsset, on_delete=models.CASCADE, related_name="findings")
     finding_type = models.CharField(max_length=64, db_index=True)  # secret/route/dependency/sast
     location = models.CharField(max_length=512, default="", blank=True)
@@ -250,6 +290,9 @@ class Technology(models.Model):
     confidence = models.FloatField(default=0.5)
     evidence = models.TextField(default="", blank=True)
     source = models.CharField(max_length=64, default="", blank=True)
+    state = models.CharField(max_length=24, default="ACTIVE", db_index=True)
+    priority = models.CharField(max_length=16, default="LOW", db_index=True)
+    priority_reasons = models.JSONField(default=list, blank=True)
     first_seen = models.DateTimeField(auto_now_add=True)
     last_seen = models.DateTimeField(auto_now=True)
     last_changed = models.DateTimeField(null=True, blank=True)
@@ -266,13 +309,17 @@ class Technology(models.Model):
 class CVE(models.Model):
     STATUS_CANDIDATE = "candidate"
     STATUS_POTENTIALLY_AFFECTED = "potentially_affected"
+    STATUS_VALIDATION_PENDING = "validation_pending"
     STATUS_VALIDATED = "validated"
     STATUS_NOT_AFFECTED = "not_affected"
+    STATUS_EXPIRED = "expired"
+    STATUS_RESOLVED = "resolved"
     STATUS_UNKNOWN = "unknown"
     STATUS_CHOICES = [
         (STATUS_CANDIDATE, "Candidate"), (STATUS_POTENTIALLY_AFFECTED, "Potentially affected"),
-        (STATUS_VALIDATED, "Validated"), (STATUS_NOT_AFFECTED, "Not affected"),
-        (STATUS_UNKNOWN, "Unknown"),
+        (STATUS_VALIDATION_PENDING, "Validation pending"), (STATUS_VALIDATED, "Validated"),
+        (STATUS_NOT_AFFECTED, "Not affected"), (STATUS_EXPIRED, "Expired"),
+        (STATUS_RESOLVED, "Resolved"), (STATUS_UNKNOWN, "Unknown"),
     ]
     target = models.ForeignKey("targets.Target", on_delete=models.CASCADE, related_name="cves")
     cve_id = models.CharField(max_length=32, db_index=True)
@@ -305,11 +352,14 @@ class SecurityFinding(models.Model):
     STATUS_NEW = "NEW"
     STATUS_OPEN = "OPEN"
     STATUS_CONFIRMED = "CONFIRMED"
+    STATUS_VALIDATED = "VALIDATED"
+    STATUS_REOPENED = "REOPENED"
     STATUS_FALSE_POSITIVE = "FALSE_POSITIVE"
     STATUS_RESOLVED = "RESOLVED"
     STATUS_UNKNOWN = "UNKNOWN"
     STATUS_CHOICES = [
         (STATUS_NEW, "New"), (STATUS_OPEN, "Open"), (STATUS_CONFIRMED, "Confirmed"),
+        (STATUS_VALIDATED, "Validated"), (STATUS_REOPENED, "Reopened"),
         (STATUS_FALSE_POSITIVE, "False positive"), (STATUS_RESOLVED, "Resolved"), (STATUS_UNKNOWN, "Unknown"),
     ]
     target = models.ForeignKey("targets.Target", on_delete=models.CASCADE, related_name="findings")
@@ -330,3 +380,27 @@ class SecurityFinding(models.Model):
 
     def __str__(self):
         return f"[{self.severity}] {self.title[:80]}"
+
+
+# --- Cross-target validation (TASK-003): impossible to link assets across targets ---
+from django.core.exceptions import ValidationError as _VE  # noqa: E402
+
+
+def _check_same_target(obj, other, name="reference"):
+    if obj is None or other is None:
+        return
+    t1 = getattr(obj, "target_id", None)
+    t2 = getattr(other, "target_id", None)
+    if t1 is not None and t2 is not None and t1 != t2:
+        raise _VE(f"Cross-target {name} rejected: target {t1} != target {t2}")
+
+
+# Attach clean methods dynamically to keep migration-friendly
+def _jsfinding_clean(self):
+    if self.js_id and self.target_id and self.js.target_id != self.target_id:
+        raise _VE("JavaScriptFinding target must match its JavaScriptAsset target")
+    if not self.target_id and self.js_id:
+        self.target = self.js.target
+
+
+JavaScriptFinding.clean = _jsfinding_clean

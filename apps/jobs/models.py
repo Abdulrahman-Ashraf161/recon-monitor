@@ -118,3 +118,96 @@ class JSAnalysisLog(models.Model):
 
     class Meta:
         ordering = ["created_at"]
+
+
+class ScanRun(models.Model):
+    """First-class monitoring execution (TASK-006). Config snapshot preserved for reproducibility."""
+    SCAN_TYPES = [(s, s) for s in ("DISCOVERY", "MONITORING", "ACTIVE", "PASSIVE", "FULL", "VALIDATION")]
+    STATUS_CHOICES = [
+        ("PENDING", "Pending"), ("RUNNING", "Running"), ("COMPLETED", "Completed"),
+        ("PARTIAL", "Partial"), ("DEGRADED", "Degraded"), ("FAILED", "Failed"),
+        ("CANCELLED", "Cancelled"), ("SKIPPED", "Skipped"),
+    ]
+    target = models.ForeignKey("targets.Target", on_delete=models.CASCADE, related_name="scan_runs")
+    scan_type = models.CharField(max_length=16, choices=SCAN_TYPES, default="MONITORING", db_index=True)
+    profile = models.CharField(max_length=16, default="balanced", db_index=True)
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default="PENDING", db_index=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    requested_by = models.CharField(max_length=255, default="", blank=True)
+    trigger = models.CharField(max_length=32, default="manual", db_index=True)
+    configuration_snapshot = models.JSONField(default=dict, blank=True)
+    error_summary = models.TextField(default="", blank=True)
+    coverage_summary = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"Run#{self.pk} {self.target} {self.scan_type}/{self.profile} [{self.status}]"
+
+    @property
+    def duration(self):
+        if self.started_at and self.finished_at:
+            return (self.finished_at - self.started_at).total_seconds()
+        return None
+
+
+class ToolExecution(models.Model):
+    """Individual tool execution within a ScanRun (TASK-007). No credentials stored."""
+    STATUS_CHOICES = ScanRun.STATUS_CHOICES
+    scan_run = models.ForeignKey(ScanRun, null=True, blank=True, on_delete=models.CASCADE, related_name="tool_executions")
+    target = models.ForeignKey("targets.Target", on_delete=models.CASCADE, related_name="tool_executions")
+    job = models.ForeignKey(ScanJob, null=True, blank=True, on_delete=models.SET_NULL, related_name="tool_executions")
+    tool_name = models.CharField(max_length=64, db_index=True)
+    command = models.TextField(default="", blank=True)  # redacted, never secrets
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default="PENDING", db_index=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    exit_code = models.IntegerField(null=True, blank=True)
+    stdout_reference = models.CharField(max_length=1024, default="", blank=True)
+    stderr_reference = models.CharField(max_length=1024, default="", blank=True)
+    duration = models.FloatField(null=True, blank=True)
+    fallback_used = models.BooleanField(default=False)
+    coverage = models.JSONField(default=dict, blank=True)
+    error = models.TextField(default="", blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def clean(self):
+        from django.core.exceptions import ValidationError
+        if self.scan_run_id and self.scan_run.target_id != self.target_id:
+            raise ValidationError("ToolExecution scan_run target mismatch — cross-target rejected")
+        if self.job_id and self.job.target_id != self.target_id:
+            raise ValidationError("ToolExecution job target mismatch — cross-target rejected")
+
+    def __str__(self):
+        return f"{self.tool_name} run#{self.scan_run_id} [{self.status}]"
+
+
+class AssetObservation(models.Model):
+    """What was observed during each scan (TASK-008). History preserved, never overwritten."""
+    scan_run = models.ForeignKey(ScanRun, on_delete=models.CASCADE, related_name="observations")
+    target = models.ForeignKey("targets.Target", on_delete=models.CASCADE, related_name="observations")
+    asset_type = models.CharField(max_length=32, db_index=True)
+    asset_id = models.IntegerField(null=True, blank=True)
+    asset_value = models.CharField(max_length=2048, default="", blank=True, db_index=True)
+    observed = models.BooleanField(default=True, db_index=True)
+    metadata_hash = models.CharField(max_length=64, default="", blank=True, db_index=True)
+    observed_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    evidence = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        ordering = ["-observed_at"]
+        indexes = [models.Index(fields=["target", "asset_type", "observed_at"])]
+
+    def clean(self):
+        from django.core.exceptions import ValidationError
+        if self.scan_run_id and self.scan_run.target_id != self.target_id:
+            raise ValidationError("AssetObservation scan_run target mismatch — cross-target rejected")
+
+    def __str__(self):
+        return f"obs {self.asset_type}:{self.asset_value[:60]} run#{self.scan_run_id} {'seen' if self.observed else 'missing'}"
