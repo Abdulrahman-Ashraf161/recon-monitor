@@ -1,5 +1,13 @@
 # FINAL AUDIT — Recon Monitor production hardening (per RECON_MONITOR_IMPLEMENTATION_PLAN.md)
 
+> SUPERSEDED (Task 33): an independent post-audit found inaccuracies in this
+> document (§1 scope-coverage claim for URL/JS was false — see Tasks 1/2;
+> §1/§3 TargetScoped enforcement was unwired — see Task 6; §3 omitted global
+> WS auth — see Task 18; §4 two-target check was manual-only — see Task 31;
+> §8 omitted IP/API reconcile + js totals — see Tasks 8/9). This file is kept
+> for history. The current verdict lives in `docs/FINAL_AUDIT_v2.md`, where
+> every claim cites an enforcing test.
+
 Date: 2026-09-26. All 88 tasks addressed. Full suite: 37 tests (17 pre-existing + 20 new) — see §4.
 
 ## 1. Summary (what changed)

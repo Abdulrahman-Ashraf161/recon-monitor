@@ -1,5 +1,7 @@
 from django.db import models
 
+from apps.core.target_scoping import TargetScopedManager
+
 
 class Baseline(models.Model):
     STATUS_NOT_STARTED = "NOT_STARTED"
@@ -9,6 +11,8 @@ class Baseline(models.Model):
         (STATUS_NOT_STARTED, "Not started"), (STATUS_RUNNING, "Running"), (STATUS_COMPLETE, "Complete"),
     ]
     target = models.OneToOneField("targets.Target", on_delete=models.CASCADE, related_name="baseline")
+    objects = TargetScopedManager()
+    all_objects = models.Manager()
     status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_NOT_STARTED, db_index=True)
     started_at = models.DateTimeField(null=True, blank=True)
     completed_at = models.DateTimeField(null=True, blank=True)
@@ -57,6 +61,8 @@ class ExportJob(models.Model):
         ("snapshot", "Full Target Snapshot (ZIP)"),
     ]
     target = models.ForeignKey("targets.Target", on_delete=models.CASCADE, related_name="exports")
+    objects = TargetScopedManager()
+    all_objects = models.Manager()
     export_type = models.CharField(max_length=32, db_index=True)
     format = models.CharField(max_length=8, default="txt")  # txt/json/csv/zip
     filters = models.JSONField(default=dict, blank=True)  # active_only, since, source, status...

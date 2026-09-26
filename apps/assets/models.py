@@ -1,7 +1,7 @@
 """Central asset inventory models (target-isolated, explicit lifecycle)."""
-from django.core.exceptions import ValidationError
 from django.db import models
 
+from apps.core.target_scoping import TargetScopedManager
 
 ASSET_STATES = [
     ("DISCOVERED", "Discovered"), ("ACTIVE", "Active"),
@@ -21,12 +21,17 @@ class Asset(models.Model):
     API_ENDPOINT = "API_ENDPOINT"
     JS_FILE = "JS_FILE"
     TECHNOLOGY = "TECHNOLOGY"
+    CVE = "CVE"
+    FINDING = "FINDING"
     TYPE_CHOICES = [
         (DOMAIN, "Domain"), (SUBDOMAIN, "Subdomain"), (IP, "IP"), (PORT, "Port"),
         (HTTP_SERVICE, "HTTP service"), (URL, "URL"), (API_ENDPOINT, "API endpoint"),
         (JS_FILE, "JS file"), (TECHNOLOGY, "Technology"),
+        (CVE, "CVE candidate"), (FINDING, "Security finding"),
     ]
     target = models.ForeignKey("targets.Target", on_delete=models.CASCADE, related_name="assets")
+    objects = TargetScopedManager()
+    all_objects = models.Manager()
     asset_type = models.CharField(max_length=32, choices=TYPE_CHOICES, db_index=True)
     value = models.CharField(max_length=2048, db_index=True)
     discovered_by_job = models.ForeignKey("jobs.ScanJob", null=True, blank=True,
@@ -52,6 +57,8 @@ class Asset(models.Model):
 
 class Subdomain(models.Model):
     target = models.ForeignKey("targets.Target", on_delete=models.CASCADE, related_name="subdomains")
+    objects = TargetScopedManager()
+    all_objects = models.Manager()
     hostname = models.CharField(max_length=512, db_index=True)
     sources = models.JSONField(default=list, blank=True)
     dns_status = models.CharField(max_length=32, default="unknown", db_index=True)
@@ -77,6 +84,8 @@ class Subdomain(models.Model):
 
 class DNSRecord(models.Model):
     target = models.ForeignKey("targets.Target", on_delete=models.CASCADE, related_name="dns_records")
+    objects = TargetScopedManager()
+    all_objects = models.Manager()
     hostname = models.CharField(max_length=512, db_index=True)
     record_type = models.CharField(max_length=16, db_index=True)  # A/AAAA/CNAME/NS/MX/TXT
     value = models.CharField(max_length=1024, db_index=True)
@@ -92,6 +101,8 @@ class DNSRecord(models.Model):
 
 class IPAddress(models.Model):
     target = models.ForeignKey("targets.Target", on_delete=models.CASCADE, related_name="ips")
+    objects = TargetScopedManager()
+    all_objects = models.Manager()
     ip = models.GenericIPAddressField(db_index=True)
     version = models.IntegerField(default=4)
     source_hostnames = models.JSONField(default=list, blank=True)
@@ -99,6 +110,12 @@ class IPAddress(models.Model):
     state = models.CharField(max_length=24, default="ACTIVE", db_index=True)
     priority = models.CharField(max_length=16, default="LOW", db_index=True)
     priority_reasons = models.JSONField(default=list, blank=True)
+    # T5: shared-infrastructure guard. Set when the same IP is seen under a
+    # different target (Cloudflare/ALB/shared hosting). Port-scanning such IPs
+    # requires explicit confirmation (confirmed_dedicated=True) — see
+    # process_new_ip()/scan_ports().
+    shared_suspect = models.BooleanField(default=False, db_index=True)
+    confirmed_dedicated = models.BooleanField(default=False)
     first_seen = models.DateTimeField(auto_now_add=True)
     last_seen = models.DateTimeField(auto_now=True)
 
@@ -111,6 +128,8 @@ class IPAddress(models.Model):
 
 class Port(models.Model):
     target = models.ForeignKey("targets.Target", on_delete=models.CASCADE, related_name="ports")
+    objects = TargetScopedManager()
+    all_objects = models.Manager()
     ip = models.CharField(max_length=64, db_index=True)
     port = models.IntegerField(db_index=True)
     protocol = models.CharField(max_length=8, default="tcp")
@@ -138,6 +157,8 @@ class Port(models.Model):
 
 class HTTPService(models.Model):
     target = models.ForeignKey("targets.Target", on_delete=models.CASCADE, related_name="http_services")
+    objects = TargetScopedManager()
+    all_objects = models.Manager()
     url = models.URLField(max_length=2048, db_index=True)
     host = models.CharField(max_length=512, db_index=True)
     port = models.IntegerField(default=443)
@@ -168,6 +189,8 @@ class HTTPService(models.Model):
 
 class URLAsset(models.Model):
     target = models.ForeignKey("targets.Target", on_delete=models.CASCADE, related_name="urls")
+    objects = TargetScopedManager()
+    all_objects = models.Manager()
     raw_url = models.TextField()
     canonical_url = models.URLField(max_length=4096, db_index=True)
     host = models.CharField(max_length=512, db_index=True)
@@ -193,6 +216,8 @@ class URLAsset(models.Model):
 
 class APIEndpoint(models.Model):
     target = models.ForeignKey("targets.Target", on_delete=models.CASCADE, related_name="api_endpoints")
+    objects = TargetScopedManager()
+    all_objects = models.Manager()
     url = models.URLField(max_length=4096, db_index=True)
     host = models.CharField(max_length=512, db_index=True)
     method = models.CharField(max_length=16, default="GET")
@@ -218,6 +243,8 @@ class APIEndpoint(models.Model):
 
 class JavaScriptAsset(models.Model):
     target = models.ForeignKey("targets.Target", on_delete=models.CASCADE, related_name="js_assets")
+    objects = TargetScopedManager()
+    all_objects = models.Manager()
     js_url = models.URLField(max_length=4096, db_index=True)
     host = models.CharField(max_length=512, db_index=True)
     discovered_from = models.CharField(max_length=2048, default="", blank=True)  # page URL that referenced it
@@ -266,6 +293,8 @@ class JavaScriptFinding(models.Model):
         (STATUS_UNKNOWN, "Unknown"),
     ]
     target = models.ForeignKey("targets.Target", on_delete=models.CASCADE, related_name="js_findings", null=True, blank=True)
+    objects = TargetScopedManager()
+    all_objects = models.Manager()
     js = models.ForeignKey(JavaScriptAsset, on_delete=models.CASCADE, related_name="findings")
     finding_type = models.CharField(max_length=64, db_index=True)  # secret/route/dependency/sast
     location = models.CharField(max_length=512, default="", blank=True)
@@ -283,6 +312,8 @@ class JavaScriptFinding(models.Model):
 
 class Technology(models.Model):
     target = models.ForeignKey("targets.Target", on_delete=models.CASCADE, related_name="technologies")
+    objects = TargetScopedManager()
+    all_objects = models.Manager()
     asset_value = models.CharField(max_length=1024, db_index=True)
     product = models.CharField(max_length=256, db_index=True)
     vendor = models.CharField(max_length=256, default="", blank=True, db_index=True)
@@ -322,6 +353,8 @@ class CVE(models.Model):
         (STATUS_RESOLVED, "Resolved"), (STATUS_UNKNOWN, "Unknown"),
     ]
     target = models.ForeignKey("targets.Target", on_delete=models.CASCADE, related_name="cves")
+    objects = TargetScopedManager()
+    all_objects = models.Manager()
     cve_id = models.CharField(max_length=32, db_index=True)
     product = models.CharField(max_length=256, db_index=True)
     vendor = models.CharField(max_length=256, default="", blank=True)
@@ -363,6 +396,8 @@ class SecurityFinding(models.Model):
         (STATUS_FALSE_POSITIVE, "False positive"), (STATUS_RESOLVED, "Resolved"), (STATUS_UNKNOWN, "Unknown"),
     ]
     target = models.ForeignKey("targets.Target", on_delete=models.CASCADE, related_name="findings")
+    objects = TargetScopedManager()
+    all_objects = models.Manager()
     asset_value = models.CharField(max_length=1024, db_index=True)
     finding_type = models.CharField(max_length=128, db_index=True)
     title = models.CharField(max_length=512)
@@ -383,7 +418,7 @@ class SecurityFinding(models.Model):
 
 
 # --- Cross-target validation (TASK-003): impossible to link assets across targets ---
-from django.core.exceptions import ValidationError as _VE  # noqa: E402
+from django.core.exceptions import ValidationError as _VE
 
 
 def _check_same_target(obj, other, name="reference"):

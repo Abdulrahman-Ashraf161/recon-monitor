@@ -1,0 +1,9 @@
+# Dev-loop override (throwaway creds ONLY — never use for real data):
+#   cd docker && cp docker-compose.override.yml.example docker-compose.override.yml
+#   printf 'POSTGRES_DB=recon\nPOSTGRES_USER=recon\nPOSTGRES_PASSWORD=recon\nDJANGO_SECRET_KEY=dev-only\nALLOWED_HOSTS=*\nDATABASE_URL=postgres://recon:recon@db:5432/recon\n' > .env
+#   docker compose up --build
+services:
+  web:
+    environment:
+      DJANGO_SETTINGS_MODULE: development
+      DJANGO_DEBUG: "True"

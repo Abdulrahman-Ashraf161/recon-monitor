@@ -148,19 +148,26 @@ def broadcast_event(event):
 
 
 def broadcast_job_like(job):
-    """Job progress: always to target_N when known, plus global jobs feed (no asset data)."""
+    """Task 18: target-linked jobs broadcast ONLY to that target's group
+    (they carry root_domain/target_id — must never reach the global feed).
+    The global "jobs" group receives target-less system jobs only."""
     try:
         layer = get_channel_layer()
         target = getattr(job, "target", None)
-        payload = {"type": "job.progress", "id": job.id,
-                   "job_type": getattr(job, "job_type", "js_analysis"),
-                   "status": job.status, "progress": getattr(job, "progress", 0),
-                   "stage": getattr(job, "current_stage", ""),
-                   "target": target.root_domain if target else "",
-                   "target_id": target.id if target else None}
         if target is not None:
+            payload = {"type": "job.progress", "id": job.id,
+                       "job_type": getattr(job, "job_type", "js_analysis"),
+                       "status": job.status, "progress": getattr(job, "progress", 0),
+                       "stage": getattr(job, "current_stage", ""),
+                       "target": target.root_domain,
+                       "target_id": target.id}
             async_to_sync(layer.group_send)(f"target_{target.id}", {"type": "event_message", "data": payload})
-        async_to_sync(layer.group_send)("jobs", {"type": "event_message", "data": payload})
+        else:
+            payload = {"type": "job.progress", "id": job.id,
+                       "job_type": getattr(job, "job_type", "js_analysis"),
+                       "status": job.status, "progress": getattr(job, "progress", 0),
+                       "stage": getattr(job, "current_stage", "")}
+            async_to_sync(layer.group_send)("jobs", {"type": "event_message", "data": payload})
     except Exception as e:
         logger.warning("job broadcast failed: %s", e)
 

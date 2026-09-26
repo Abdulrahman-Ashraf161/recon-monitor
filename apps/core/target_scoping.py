@@ -80,14 +80,45 @@ class TargetAssetService:
     def list(model, target, **filters):
         return model.objects.filter(target_id=getattr(target, "pk", target), **filters)
 
+    # Task 17: dashboard calls counts() on every render (11 sequential
+    # COUNTs). Cache per target for 60s in the default cache. Values may lag
+    # writes by up to the TTL — the dashboard labels them "as of ~1 min ago".
+    # Call invalidate_counts(target) after bulk ingest if fresher data matters.
+    COUNTS_TTL = 60
+
     @staticmethod
-    def counts(target):
-        from apps.assets.models import (APIEndpoint, CVE, HTTPService, IPAddress,
-                                        JavaScriptAsset, Port, SecurityFinding,
-                                        Subdomain, URLAsset, Technology)
+    def _counts_key(target):
+        return f"target_counts:{getattr(target, 'pk', target)}"
+
+    @staticmethod
+    def invalidate_counts(target):
+        from django.core.cache import cache
+        cache.delete(TargetAssetService._counts_key(target))
+
+    @staticmethod
+    def counts(target, use_cache=True):
+        from django.core.cache import cache
+
+        from apps.assets.models import (
+            CVE,
+            APIEndpoint,
+            HTTPService,
+            IPAddress,
+            JavaScriptAsset,
+            Port,
+            SecurityFinding,
+            Subdomain,
+            Technology,
+            URLAsset,
+        )
         from apps.events.models import Event
         tid = getattr(target, "pk", target)
-        return {
+        key = TargetAssetService._counts_key(target)
+        if use_cache:
+            cached = cache.get(key)
+            if cached is not None:
+                return cached
+        result = {
             "subdomains": Subdomain.objects.filter(target_id=tid, is_active=True).count(),
             "ips": IPAddress.objects.filter(target_id=tid, is_active=True).count(),
             "ports": Port.objects.filter(target_id=tid, state="open").count(),
@@ -101,6 +132,9 @@ class TargetAssetService:
             .exclude(status="RESOLVED").exclude(status="FALSE_POSITIVE").count(),
             "events": Event.objects.filter(target_id=tid).count(),
         }
+        if use_cache:
+            cache.set(key, result, TargetAssetService.COUNTS_TTL)
+        return result
 
 
 class TargetEventService:

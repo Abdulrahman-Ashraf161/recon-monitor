@@ -1,6 +1,51 @@
 """Scope Validator — mandatory gate before ANY active operation."""
 import ipaddress
 
+# T4: SSRF guard — ranges that must never be actively fetched/scanned, even if a
+# hostname that resolves into them passes validate_host(). Checked unconditionally
+# in validate_ip() (no scope rule can re-enable them) and at the HTTP layer via
+# host_resolves_to_blocked() before every outbound fetch (defense-in-depth
+# against DNS rebinding: validate at connect time, not just ingest time).
+PRIVATE_BLOCK_NETWORKS = [
+    ipaddress.ip_network(n) for n in (
+        "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8",
+        "169.254.0.0/16", "172.16.0.0/12", "192.0.0.0/24", "192.168.0.0/16",
+        "198.18.0.0/15", "224.0.0.0/4", "::1/128", "fc00::/7", "fe80::/10",
+    )
+]
+
+
+def is_private_or_reserved(ip_str: str) -> bool:
+    """True if the IP must never be touched. Fail-closed on unparsable input."""
+    try:
+        addr = ipaddress.ip_address(str(ip_str).strip())
+    except ValueError:
+        return True
+    return (any(addr in net for net in PRIVATE_BLOCK_NETWORKS)
+            or addr.is_multicast or addr.is_reserved or addr.is_unspecified)
+
+
+def host_resolves_to_blocked(hostname: str) -> tuple[bool, str]:
+    """Resolve-then-check helper for the HTTP layer (T4 defense-in-depth).
+
+    Returns (blocked, reason). Any resolved address in a blocked range blocks
+    the fetch. DNS failures return (False, ...) — resolution errors are handled
+    by the caller's normal fetch-failure path, not the SSRF path.
+    """
+    import socket
+
+    try:
+        infos = socket.getaddrinfo(hostname, None)
+    except Exception:
+        return False, "unresolvable"
+    for fam, _, _, _, sockaddr in infos:
+        ip = sockaddr[0]
+        # Strip IPv6 zone ids (fe80::1%eth0) before parsing.
+        ip = ip.split("%")[0]
+        if is_private_or_reserved(ip):
+            return True, f"resolves to blocked IP {ip}"
+    return False, "ok"
+
 
 def _matches_domain(host: str, pattern: str) -> bool:
     host = host.lower().rstrip(".")
@@ -38,6 +83,10 @@ def validate_ip(target, ip: str, scope_rules) -> tuple[bool, str]:
         addr = ipaddress.ip_address(ip)
     except ValueError:
         return False, "invalid ip"
+    # T4: private/reserved ranges are blocked unconditionally — no scope rule
+    # (allow_ip or otherwise) can re-enable scanning of link-local/metadata space.
+    if is_private_or_reserved(ip):
+        return False, "private/reserved IP blocked"
     for r in scope_rules:
         if r.rule_type == "exclude_ip":
             try:

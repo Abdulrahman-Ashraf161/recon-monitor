@@ -2,6 +2,8 @@
 from django.conf import settings
 from django.db import models
 
+from apps.core.target_scoping import TargetScopedManager
+
 
 class ScopeRule(models.Model):
     RULE_ALLOW_DOMAIN = "allow_domain"
@@ -23,6 +25,8 @@ class ScopeRule(models.Model):
     target = models.ForeignKey(
         "targets.Target", null=True, blank=True, on_delete=models.CASCADE, related_name="scope_rules"
     )
+    objects = TargetScopedManager()
+    all_objects = models.Manager()
     rule_type = models.CharField(max_length=32, choices=RULE_CHOICES, db_index=True)
     value = models.CharField(max_length=512)
     created_by = models.ForeignKey(

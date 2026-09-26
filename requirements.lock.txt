@@ -1,0 +1,56 @@
+# requirements.lock.txt — exact pinned working set (Task 28).
+# Generated from the verified venv (pip freeze); regenerate with:
+#   pip-compile requirements.txt --generate-hashes -o requirements.lock.txt
+# and re-verify with: python manage.py test
+# NOTE: psycopg2-binary is pinned for Postgres/prod (not installed in this SQLite dev venv).
+
+Automat==25.4.16
+Django==6.1.1
+Incremental==24.11.0
+Twisted==26.4.0
+amqp==5.4.0
+asgiref==3.12.1
+attrs==26.1.0
+autobahn==26.7.1
+billiard==4.3.0
+cbor2==6.1.4
+celery==5.6.3
+certifi==2026.7.22
+cffi==2.1.1
+channels==4.3.2
+charset-normalizer==3.5.1
+click-didyoumean==0.3.1
+click-plugins==1.1.1.2
+click-repl==0.4.0
+click==8.5.0
+constantly==23.10.4
+cryptography==50.0.1
+daphne==4.2.3
+django-filter==26.1
+djangorestframework==3.18.1
+dnspython==2.8.0
+hyperlink==21.0.0
+idna==3.20
+kombu==5.6.2
+msgpack==1.2.2
+packaging==26.3
+prompt_toolkit==3.0.53
+pyOpenSSL==26.4.0
+pycparser==3.0
+python-dateutil==2.9.0.post0
+python-dotenv==1.2.3
+redis==8.1.0
+requests==2.34.2
+service-identity==26.1.0
+six==1.17.0
+sqlparse==0.6.0
+txaio==26.6.1
+typing_extensions==4.16.0
+tzdata==2026.4
+tzlocal==5.4.4
+ujson==6.0.0
+urllib3==2.8.0
+vine==5.1.0
+wcwidth==0.9.1
+zope.interface==8.6
+psycopg2-binary==2.9.10  # prod Postgres driver (see NOTE above)

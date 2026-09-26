@@ -1,6 +1,8 @@
 from django.conf import settings
 from django.db import models
 
+from apps.core.target_scoping import TargetScopedManager
+
 
 class AuditLog(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL)
@@ -10,6 +12,8 @@ class AuditLog(models.Model):
     old_value = models.TextField(default="", blank=True)
     new_value = models.TextField(default="", blank=True)
     target = models.ForeignKey("targets.Target", null=True, blank=True, on_delete=models.SET_NULL, related_name="audit_logs")
+    objects = TargetScopedManager()
+    all_objects = models.Manager()
     ip = models.GenericIPAddressField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
 

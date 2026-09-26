@@ -1,6 +1,8 @@
 """Scan job tracking + structured logs."""
 from django.db import models
 
+from apps.core.target_scoping import TargetScopedManager
+
 
 class ScanJob(models.Model):
     STATUS_QUEUED = "QUEUED"
@@ -17,6 +19,8 @@ class ScanJob(models.Model):
         (STATUS_PAUSED, "Paused"), (STATUS_SKIPPED, "Skipped"),
     ]
     target = models.ForeignKey("targets.Target", on_delete=models.CASCADE, related_name="jobs")
+    objects = TargetScopedManager()
+    all_objects = models.Manager()
     parent = models.ForeignKey("self", null=True, blank=True, on_delete=models.SET_NULL,
                                related_name="children")  # which job triggered this one
     asset_type = models.CharField(max_length=32, default="", blank=True, db_index=True)
@@ -87,6 +91,8 @@ class JSAnalysisJob(models.Model):
         (STATUS_PARTIAL, "Partial"), (STATUS_FAILED, "Failed"),
     ]
     target = models.ForeignKey("targets.Target", on_delete=models.CASCADE, related_name="js_jobs")
+    objects = TargetScopedManager()
+    all_objects = models.Manager()
     js = models.ForeignKey("assets.JavaScriptAsset", on_delete=models.CASCADE, related_name="analysis_jobs")
     parent_job = models.ForeignKey(ScanJob, null=True, blank=True, on_delete=models.SET_NULL,
                                    related_name="js_analyses")
@@ -129,6 +135,8 @@ class ScanRun(models.Model):
         ("CANCELLED", "Cancelled"), ("SKIPPED", "Skipped"),
     ]
     target = models.ForeignKey("targets.Target", on_delete=models.CASCADE, related_name="scan_runs")
+    objects = TargetScopedManager()
+    all_objects = models.Manager()
     scan_type = models.CharField(max_length=16, choices=SCAN_TYPES, default="MONITORING", db_index=True)
     profile = models.CharField(max_length=16, default="balanced", db_index=True)
     status = models.CharField(max_length=16, choices=STATUS_CHOICES, default="PENDING", db_index=True)
@@ -159,6 +167,8 @@ class ToolExecution(models.Model):
     STATUS_CHOICES = ScanRun.STATUS_CHOICES
     scan_run = models.ForeignKey(ScanRun, null=True, blank=True, on_delete=models.CASCADE, related_name="tool_executions")
     target = models.ForeignKey("targets.Target", on_delete=models.CASCADE, related_name="tool_executions")
+    objects = TargetScopedManager()
+    all_objects = models.Manager()
     job = models.ForeignKey(ScanJob, null=True, blank=True, on_delete=models.SET_NULL, related_name="tool_executions")
     tool_name = models.CharField(max_length=64, db_index=True)
     command = models.TextField(default="", blank=True)  # redacted, never secrets
@@ -192,6 +202,8 @@ class AssetObservation(models.Model):
     """What was observed during each scan (TASK-008). History preserved, never overwritten."""
     scan_run = models.ForeignKey(ScanRun, on_delete=models.CASCADE, related_name="observations")
     target = models.ForeignKey("targets.Target", on_delete=models.CASCADE, related_name="observations")
+    objects = TargetScopedManager()
+    all_objects = models.Manager()
     asset_type = models.CharField(max_length=32, db_index=True)
     asset_id = models.IntegerField(null=True, blank=True)
     asset_value = models.CharField(max_length=2048, default="", blank=True, db_index=True)

@@ -42,19 +42,29 @@ fi
 .venv/bin/python manage.py migrate --noinput
 echo "--> database ready"
 
-# 5. Admin user (only if none exists) — static default credentials
+# 5. Admin user (only if none exists) — Task 27: random password by default,
+# never the static admin/admin. The account must change it on first login.
 NUSERS=$(echo "from django.contrib.auth.models import User; print(User.objects.count())" | .venv/bin/python manage.py shell 2>/dev/null | tail -n 1)
 if [ "$NUSERS" = "0" ]; then
-  ADMIN_PASS="${ADMIN_PASSWORD:-admin}"
+  if [ -n "${ADMIN_PASSWORD:-}" ]; then
+    ADMIN_PASS="$ADMIN_PASSWORD"
+  else
+    ADMIN_PASS="$(python3 -c 'import secrets; print(secrets.token_urlsafe(16))')"
+  fi
+  export SETUP_ADMIN_PASS="$ADMIN_PASS"
   .venv/bin/python manage.py createsuperuser --noinput --username admin --email admin@localhost >/dev/null 2>&1 || true
   echo "
+import os
 from django.contrib.auth.models import User
 u = User.objects.get(username='admin')
-u.set_password('$ADMIN_PASS'); u.save()
+u.set_password(os.environ['SETUP_ADMIN_PASS']); u.save()
+u.profile.must_change_password = True; u.profile.save(update_fields=['must_change_password'])
 " | .venv/bin/python manage.py shell >/dev/null 2>&1
+  unset SETUP_ADMIN_PASS
   echo "=================================================="
   echo "  Login: admin"
-  echo "  Password: $ADMIN_PASS  (change it after login!)"
+  echo "  Password: $ADMIN_PASS"
+  echo "  You will be asked to change it on first login."
   echo "  Custom password: ADMIN_PASSWORD=secret ./scripts/setup.sh"
   echo "=================================================="
 fi

@@ -2,6 +2,7 @@
 {% block title %}Dashboard — Recon Monitor{% endblock %}
 {% block content %}
 <h2>Security Overview</h2>
+{% if active_target %}<p class="muted">Target counts cached ~1 min (Task 17).</p>{% endif %}
 <div class="cards">
 <div class="card"><div class="n">{{ counts.targets }}</div><div class="l">Targets</div></div>
 <div class="card"><div class="n">{{ counts.subdomains }}</div><div class="l">Subdomains</div></div>

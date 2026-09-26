@@ -2,6 +2,6 @@
 {% block content %}<h2>Asset inventory</h2>
 <div class="filters"><form method="get"><input name="q" value="{{ q }}" placeholder="search value"><select name="type"><option value="">all types</option><option>SUBDOMAIN</option><option>IP</option><option>PORT</option><option>HTTP_SERVICE</option><option>URL</option><option>API_ENDPOINT</option><option>JS_FILE</option><option>TECHNOLOGY</option></select><button>Filter</button></form></div>
 <div class="panel"><table><tr><th>Type</th><th>Value</th><th>Target</th><th>Last seen</th></tr>
-{% for a in page %}<tr><td><span class="badge">{{ a.asset_type }}</span></td><td><a href="/assets/{{ a.id }}/">{{ a.value|truncatechars:80 }}</a></td><td>{{ a.target.root_domain }}</td><td>{{ a.last_seen }}</td></tr>{% endfor %}</table>
+{% for a in page %}<tr><td><span class="badge">{{ a.asset_type }}</span></td><td><a href="/assets/{{ a.id }}/{% if target_id %}?target={{ target_id }}{% endif %}">{{ a.value|truncatechars:80 }}</a></td><td>{{ a.target.root_domain }}</td><td>{{ a.last_seen }}</td></tr>{% endfor %}</table>
 <div class="pager">{% if page.has_previous %}<a href="?page={{ page.previous_page_number }}&q={{ q }}&type={{ atype }}">prev</a>{% endif %} page {{ page.number }} of {{ page.paginator.num_pages }} {% if page.has_next %}<a href="?page={{ page.next_page_number }}&q={{ q }}&type={{ atype }}">next</a>{% endif %}</div></div>
 {% endblock %}

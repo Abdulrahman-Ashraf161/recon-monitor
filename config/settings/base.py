@@ -24,17 +24,27 @@ def env_bool(name, default=False):
 
 
 SECRET_KEY = env("DJANGO_SECRET_KEY", "")
+# Task 16: remember whether the key is operator-provided or an ephemeral
+# fallback, so production.py can hard-fail instead of silently generating.
+SECRET_KEY_WAS_GENERATED = False
 if not SECRET_KEY or SECRET_KEY == "change-me-in-production-use-50-random-chars":
     import logging as _logging
 
     from django.core.management.utils import get_random_secret_key
 
     SECRET_KEY = get_random_secret_key()
+    SECRET_KEY_WAS_GENERATED = True
     _logging.getLogger(__name__).warning(
         "DJANGO_SECRET_KEY not set — using an ephemeral key. Sessions will reset on restart. "
         "Set DJANGO_SECRET_KEY in .env for production.")
 DEBUG = env_bool("DJANGO_DEBUG", True)
-ALLOWED_HOSTS = [h.strip() for h in env("ALLOWED_HOSTS", "*" if DEBUG else "localhost,127.0.0.1").split(",") if h.strip()]
+# Task 15: ALLOWED_HOSTS is derived AFTER DEBUG from an empty default, so a
+# production settings module that forgets DJANGO_DEBUG=False can never inherit
+# a ["*"] wildcard computed under development defaults. production.py hard-fails
+# on ["*"]/empty (Task 15); development explicitly opts into ["*"] below.
+ALLOWED_HOSTS = [h.strip() for h in env("ALLOWED_HOSTS", "").split(",") if h.strip()]
+if not ALLOWED_HOSTS:
+    ALLOWED_HOSTS = ["*"] if DEBUG else ["localhost", "127.0.0.1"]
 CSRF_TRUSTED_ORIGINS = [h.strip() for h in env("CSRF_TRUSTED_ORIGINS", "").split(",") if h.strip()]
 
 INSTALLED_APPS = [
@@ -67,6 +77,7 @@ MIDDLEWARE = [
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
+    "apps.accounts.middleware.MustChangePasswordMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
     "apps.audit.middleware.AuditMiddleware",
@@ -192,6 +203,18 @@ DISCORD_MIN_SEVERITY = env("DISCORD_MIN_SEVERITY", "LOW")
 DATA_DIR = BASE_DIR / "data"
 RAW_DIR = DATA_DIR / "raw"
 ARTIFACTS_DIR = DATA_DIR / "artifacts"
+
+# --- Recon tool binaries (Task 25) ---
+# Absolute dir pinned ahead of PATH (e.g. /opt/recon-tools/bin in production).
+# Empty (default) keeps the dev flow: ~/go/bin + ambient PATH via scripts/setup_tools.sh.
+TOOL_BIN_DIR = env("TOOL_BIN_DIR", "")
+
+# --- Target isolation posture (Task 7) ---
+# True: single-tenant install — every authenticated viewer may browse every
+# target; global (unscoped) list views stay cross-target BY DESIGN, while
+# detail views still enforce an explicit/session target context on mismatch.
+# False (future multi-tenant): target context becomes mandatory everywhere.
+SINGLE_TENANT_ALL_TARGETS = env_bool("SINGLE_TENANT_ALL_TARGETS", True)
 
 SECURE_BROWSER_XSS_FILTER = True
 SESSION_COOKIE_HTTPONLY = True

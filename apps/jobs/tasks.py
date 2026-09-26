@@ -1,7 +1,6 @@
 """Celery pipeline: discovery -> dns -> network -> http -> urls -> js -> tech/cve -> nuclei.
 Every task: scope-gated, kill-switch aware, failure-isolated, resumable via ScanJob.checkpoint."""
 import logging
-import time
 import uuid
 
 from celery import shared_task
@@ -11,8 +10,9 @@ logger = logging.getLogger(__name__)
 # --- TASK-006/007/008/059/060/061/071 helpers: ScanRun + ToolExecution + observations ---
 def _get_or_create_run(target, scan_type="MONITORING", profile="", trigger="manual", requested_by=""):
     """Idempotent-ish: reuse latest RUNNING run for same target/type, else create."""
-    from apps.jobs.models import ScanRun
     from django.utils import timezone as _tz
+
+    from apps.jobs.models import ScanRun
     prof = profile or getattr(target, "scan_profile", "balanced") or "balanced"
     cfg = {"scan_config": getattr(target, "scan_config", {}), "profile": prof,
            "verify_tls": getattr(target, "verify_tls", True)}
@@ -38,8 +38,9 @@ def _finish_run(run, status="COMPLETED", coverage=None, error=""):
 
 
 def _record_tool(target, scan_run, job, tool_name, status, error="", fallback=False, coverage=None):
-    from apps.jobs.models import ToolExecution
     from django.utils import timezone as _tz
+
+    from apps.jobs.models import ToolExecution
     try:
         ToolExecution.objects.create(target=target, scan_run=scan_run, job=job, tool_name=tool_name,
                                      status=status, finished_at=_tz.now(), error=str(error)[:2000],
@@ -52,8 +53,10 @@ def _observe(target, scan_run, asset_type, asset_id=None, asset_value="", observ
     """TASK-008: append-only observation row (history preserved)."""
     if scan_run is None:
         return
+    import hashlib as _hl
+    import json as _js
+
     from apps.jobs.models import AssetObservation
-    import hashlib as _hl, json as _js
     try:
         mh = _hl.sha256(_js.dumps(state or evidence or {}, sort_keys=True, default=str).encode()).hexdigest()[:16]
         AssetObservation.objects.create(scan_run=scan_run, target=target, asset_type=asset_type,
@@ -94,6 +97,133 @@ def _log(job, level, message, stage="", tool=""):
     from apps.jobs.models import JobLog
 
     JobLog.objects.create(job=job, level=level, message=message[:2000], stage=stage, tool=tool)
+
+
+class _ReconFetchSkipped(Exception):
+    """Raised when a recon fetch is refused by scope/SSRF policy (skip, don't error)."""
+
+
+def _ssl_context_for(target, job=None, stage=""):
+    """T3: honor target.verify_tls on every stdlib fetch path.
+
+    verify_tls=True (default) -> default secure context (certs validated;
+    ssl.SSLCertVerificationError surfaces as a normal fetch failure).
+    verify_tls=False -> insecure context + explicit WARNING log (opt-in only).
+    """
+    import ssl
+
+    verify = getattr(target, "verify_tls", True)
+    ctx = ssl.create_default_context()
+    if not verify:
+        if job is not None:
+            _log(job, "WARNING", "TLS verification DISABLED by target config (verify_tls=false)",
+                 stage=stage or "fetch")
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
+
+def _url_allowed_for_fetch(target, url, rules=None):
+    """T2+T4: scope + SSRF pre-check for an outbound fetch URL.
+
+    Hostnames -> validate_host(); IP literals -> validate_ip() (which now
+    unconditionally blocks private/reserved ranges, T4). Then resolve-then-check
+    (host_resolves_to_blocked) as DNS-rebinding defense-in-depth.
+    Returns (allowed: bool, reason: str, host: str).
+    """
+    import ipaddress
+    from urllib.parse import urlparse
+
+    from services.scope_engine.validator import (
+        host_resolves_to_blocked,
+        validate_host,
+        validate_ip,
+    )
+
+    try:
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower().rstrip(".")
+    except Exception as e:
+        return False, f"unparseable url: {e}", ""
+    # Bandit B310 + SSRF: only http(s) fetches; file:/custom schemes rejected.
+    if parsed.scheme not in ("http", "https"):
+        return False, f"unsupported scheme {parsed.scheme or '(none)'}", ""
+    if not host:
+        return False, "no host in url", ""
+    if rules is None:
+        from apps.scope.models import ScopeRule
+        rules = list(ScopeRule.objects.filter(target__in=[None, target]))
+    try:
+        ipaddress.ip_address(host)
+        ok, reason = validate_ip(target, host, rules)
+    except ValueError:
+        ok, reason = validate_host(target, host, rules)
+    if not ok:
+        return False, f"out-of-scope host {host}: {reason}", host
+    blocked, why = host_resolves_to_blocked(host)
+    if blocked:
+        return False, f"blocked host {host}: {why}", host
+    return True, "ok", host
+
+
+def _fetch_url_for_recon(target, url, job=None, stage="", timeout=10, max_bytes=2000000, rules=None):
+    """T2+T3+T4: scoped, SSRF-checked, TLS-honoring fetch. Returns bytes.
+
+    Raises _ReconFetchSkipped for policy refusals (log + continue),
+    or the underlying exception for genuine fetch failures.
+    """
+    import urllib.request
+
+    ok, reason, _host = _url_allowed_for_fetch(target, url, rules=rules)
+    if not ok:
+        raise _ReconFetchSkipped(reason)
+    ctx = _ssl_context_for(target, job, stage)
+    req = urllib.request.Request(url, headers={"User-Agent": "recon-monitor/1.0"})
+    with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
+        return r.read(max_bytes)
+
+
+def _extract_and_ingest_scripts(target, html, page_url, job=None, source="crawler"):
+    """T2 (shared by discover_js_for_target + host_url_discovery): find
+    <script src>, scope-check each host via _fetch_url_for_recon, fetch, ingest.
+    Out-of-scope / blocked scripts are logged and skipped, never fetched."""
+    import re
+    from urllib.parse import urlparse
+
+    from services.correlation.ingest import ingest_js
+
+    count = 0
+    try:
+        p = urlparse(page_url)
+    except Exception:
+        return 0
+    for m in re.finditer(r'<script[^>]+src=["\']([^"\']+)["\']', html, re.IGNORECASE):
+        src = m.group(1)
+        if src.startswith("//"):
+            src = "https:" + src
+        elif src.startswith("/"):
+            src = f"{p.scheme}://{p.netloc}{src}"
+        elif not src.startswith("http"):
+            continue
+        try:
+            body = _fetch_url_for_recon(target, src, job=job, stage="js")
+        except _ReconFetchSkipped as e:
+            if job is not None:
+                _log(job, "INFO", f"skipped script {src[:200]}: {e}", stage="js")
+            continue
+        except Exception:
+            continue
+        try:
+            js, outcome = ingest_js(target, src, body, source=source)
+            try:
+                js.discovered_from = page_url[:2000]
+                js.save(update_fields=["discovered_from"])
+            except Exception:
+                pass
+            count += 1
+        except Exception:
+            continue
+    return count
 
 
 def _gate(target) -> tuple[bool, str]:
@@ -165,8 +295,13 @@ def discover_subdomains(target_id, run_id=""):
     from apps.scope.models import ScopeRule
     from services.correlation.ingest import detect_wildcard, ingest_subdomains
     from services.scope_engine.validator import scope_allows_scan
-    from services.tool_adapters.adapters import (AmassAdapter, AssetfinderAdapter, CrtshAdapter,
-                                                 FindomainAdapter, SubfinderAdapter)
+    from services.tool_adapters.adapters import (
+        AmassAdapter,
+        AssetfinderAdapter,
+        CrtshAdapter,
+        FindomainAdapter,
+        SubfinderAdapter,
+    )
 
     job, target = _job(target_id, "subdomain_enum", tool="multi", baseline=target_is_baseline(target_id), run_id=run_id)
     ok, reason = scope_allows_scan(target, list(ScopeRule.objects.filter(target__in=[None, target])))
@@ -241,24 +376,31 @@ def resolve_dns(target_id, run_id=""):
     records = []
     # Prefer dnsx binary if present; else stdlib A-record resolution
     from services.tool_adapters.adapters import DnsxAdapter
+    from services.tool_adapters.base import redact_command
 
     adapter = DnsxAdapter()
     if adapter.is_available():
-        import subprocess
-
+        # Task 13: single adapter.run(hosts) path (stdin piped, redacted cmd logged).
+        job.command_redacted = redact_command(adapter.build_command(hosts))
+        job.save(update_fields=["command_redacted"])
         try:
-            p = subprocess.run([adapter.binary, "-silent", "-json", "-a", "-resp"], input="\n".join(hosts),
-                               capture_output=True, text=True, timeout=300)
-            for line in p.stdout.splitlines():
-                import json as _json
-
-                try:
-                    o = _json.loads(line)
+            res = adapter.run(hosts, timeout=300)
+            if res.status == "SKIPPED":
+                _log(job, "WARNING", "dnsx not installed, falling back to socket", stage="dns", tool="dnsx")
+            elif res.status == "FAILED":
+                _log(job, "ERROR", f"dnsx failed, falling back to socket: {res.error}", stage="dns", tool="dnsx")
+            else:
+                if res.status == "PARTIAL":
+                    _log(job, "WARNING", f"dnsx partial: {res.error}", stage="dns", tool="dnsx")
+                for o in res.data:
+                    if not isinstance(o, dict):
+                        continue
                     h = o.get("host") or o.get("input") or o.get("name") or ""
                     for a in o.get("a") or []:
                         records.append({"hostname": h, "type": "A", "value": a})
-                except Exception:
-                    continue
+                    for aaaa in o.get("aaaa") or []:
+                        records.append({"hostname": h, "type": "AAAA", "value": aaaa})
+                _log(job, "INFO", f"dnsx: {len(records)} records", stage="dns", tool="dnsx")
         except Exception as e:
             _log(job, "ERROR", f"dnsx failed, falling back to socket: {e}", stage="dns", tool="dnsx")
     if not records:
@@ -294,6 +436,15 @@ def scan_ports(target_id, run_id=""):
     ports_cfg = (target.scan_config or {}).get("ports", "80,443,8080,8443,8000,8888,3000,5000,22,21,25,53,3306,5432,6379,27017")
     port_list = [int(p) for p in str(ports_cfg).split(",") if p.strip().isdigit()]
     ips = list(IPAddress.objects.filter(target=target, is_active=True).values_list("ip", flat=True)[:500])
+    # T5: never actively scan shared-suspect IPs without explicit confirmation.
+    shared_skipped = list(IPAddress.objects.filter(
+        target=target, is_active=True, shared_suspect=True,
+        confirmed_dedicated=False).values_list("ip", flat=True)[:500])
+    if shared_skipped:
+        _log(job, "WARNING",
+             f"skipped {len(shared_skipped)} shared-suspect IP(s) (shared_ip_unconfirmed): "
+             + ", ".join(shared_skipped[:10]), stage="ports", tool="naabu")
+        ips = [ip for ip in ips if ip not in set(shared_skipped)]
     entries = []
     from services.tool_adapters.adapters import NaabuAdapter
 
@@ -343,38 +494,37 @@ def probe_http(target_id, run_id=""):
         candidates.add(f"{scheme}://{p.ip}:{p.port}")
     entries = []
     from services.tool_adapters.adapters import HttpxAdapter
+    from services.tool_adapters.base import redact_command
 
     adapter = HttpxAdapter()
     if adapter.is_available() and candidates:
-        import subprocess
-
+        # Task 13: single adapter.run(hosts) path (stdin piped, redacted cmd logged).
+        job.command_redacted = redact_command(adapter.build_command(sorted(candidates)))
+        job.save(update_fields=["command_redacted"])
         try:
-            p = subprocess.run([adapter.binary, "-silent", "-json", "-title", "-tech-detect",
-                                "-status-code", "-server", "-ip"], input="\n".join(sorted(candidates)),
-                               capture_output=True, text=True, timeout=600)
-            import json as _json
-
-            for line in p.stdout.splitlines():
-                try:
-                    entries.append(_json.loads(line))
-                except Exception:
-                    continue
-            _log(job, "INFO", f"httpx: {len(entries)} services", stage="http", tool="httpx")
+            res = adapter.run(sorted(candidates), timeout=600)
+            if res.status == "FAILED":
+                _log(job, "ERROR", f"httpx failed: {res.error}", stage="http", tool="httpx")
+            else:
+                if res.status == "PARTIAL":
+                    _log(job, "WARNING", f"httpx partial: {res.error}", stage="http", tool="httpx")
+                entries.extend(o for o in res.data if isinstance(o, dict))
+                _log(job, "INFO", f"httpx: {len(entries)} services", stage="http", tool="httpx")
         except Exception as e:
             _log(job, "ERROR", f"httpx failed: {e}", stage="http", tool="httpx")
     if not entries:
-        import ssl
         import urllib.request
 
         for url in sorted(candidates)[:200]:
             try:
-                verify = getattr(target, "verify_tls", True)
-                if not verify:
-                    _log(job, "WARNING", "TLS verification DISABLED by target config (verify_tls=false)", stage="http", tool="urllib")
-                ctx = ssl.create_default_context()
-                if not verify:
-                    ctx.check_hostname = False
-                    ctx.verify_mode = ssl.CERT_NONE
+                # T2+T4: candidates derive from our own asset rows, but re-check
+                # scope + resolved IP before touching the network (redirects /
+                # stale DNS can point anywhere).
+                ok, reason, _h = _url_allowed_for_fetch(target, url)
+                if not ok:
+                    _log(job, "INFO", f"skipped probe {url[:200]}: {reason}", stage="http", tool="urllib")
+                    continue
+                ctx = _ssl_context_for(target, job, stage="http")  # T3
                 req = urllib.request.Request(url, headers={"User-Agent": "recon-monitor/1.0"})
                 with urllib.request.urlopen(req, timeout=8, context=ctx) as r:
                     entries.append({"url": url, "host": urllib.parse.urlparse(url).hostname or "",
@@ -383,7 +533,7 @@ def probe_http(target_id, run_id=""):
                                     "content_type": r.headers.get("Content-Type", "")})
             except Exception:
                 continue
-    import urllib.parse  # noqa: E402
+    import urllib.parse
 
     new, changed = ingest_http(target, entries)
     # lightweight tech fingerprint from server headers
@@ -399,7 +549,7 @@ def probe_http(target_id, run_id=""):
 @shared_task(name="apps.jobs.tasks.discover_urls")
 def discover_urls(target_id, run_id=""):
     from apps.assets.models import HTTPService
-    from services.correlation.ingest import ingest_js, ingest_urls
+    from services.correlation.ingest import ingest_urls
 
     job, target = _job(target_id, "urls", tool="gau/waybackurls/katana", baseline=target_is_baseline(target_id), run_id=run_id)
     ok, reason = _gate(target)
@@ -408,7 +558,12 @@ def discover_urls(target_id, run_id=""):
         return {"status": "SKIPPED", "reason": reason}
     items = []
     partial = False
-    from services.tool_adapters.adapters import (GauAdapter, KatanaAdapter, WaybackurlsAdapter, WaymoreAdapter)
+    from services.tool_adapters.adapters import (
+        GauAdapter,
+        KatanaAdapter,
+        WaybackurlsAdapter,
+        WaymoreAdapter,
+    )
 
     for cls in (GauAdapter, WaybackurlsAdapter, WaymoreAdapter):
         a = cls()
@@ -447,45 +602,28 @@ def discover_urls(target_id, run_id=""):
 
 
 def discover_js_for_target(target, job=None):
-    """Download script URLs from live HTTP services and ingest with hashing/analysis."""
-    import re
-    import ssl
-    import urllib.request
+    """Download script URLs from live HTTP services and ingest with hashing/analysis.
 
+    T2+T3+T4: page fetches and every <script src> fetch go through
+    _fetch_url_for_recon (scope-validated, SSRF-checked, TLS-honoring).
+    Out-of-scope third-party scripts (CDNs, trackers, planted refs) are
+    logged and skipped, never fetched.
+    """
     from apps.assets.models import HTTPService
 
     count = 0
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
     for svc in HTTPService.objects.filter(target=target).order_by("-last_seen")[:30]:
         try:
-            req = urllib.request.Request(svc.url, headers={"User-Agent": "recon-monitor/1.0"})
-            with urllib.request.urlopen(req, timeout=10, context=ctx) as r:
-                html = r.read().decode("utf-8", errors="ignore")[:500000]
+            raw = _fetch_url_for_recon(target, svc.url, job=job, stage="js",
+                                       timeout=10, max_bytes=500000)
+        except _ReconFetchSkipped as e:
+            if job is not None:
+                _log(job, "INFO", f"skipped page {svc.url[:200]}: {e}", stage="js")
+            continue
         except Exception:
             continue
-        for m in re.finditer(r'<script[^>]+src=["\']([^"\']+)["\']', html, re.IGNORECASE):
-            src = m.group(1)
-            if src.startswith("//"):
-                src = "https:" + src
-            elif src.startswith("/"):
-                from urllib.parse import urlparse
-
-                p = urlparse(svc.url)
-                src = f"{p.scheme}://{p.netloc}{src}"
-            elif not src.startswith("http"):
-                continue
-            try:
-                rq = urllib.request.Request(src, headers={"User-Agent": "recon-monitor/1.0"})
-                with urllib.request.urlopen(rq, timeout=10, context=ctx) as r2:
-                    body = r2.read()[:2000000]
-                from services.correlation.ingest import ingest_js
-
-                ingest_js(target, src, body, source="crawler")
-                count += 1
-            except Exception:
-                continue
+        html = raw.decode("utf-8", errors="ignore")
+        count += _extract_and_ingest_scripts(target, html, svc.url, job=job, source="crawler")
     return count
 
 
@@ -525,7 +663,6 @@ def handle_event_dependents(event_id):
     Coalesces: if the dependent stage already has a QUEUED/RUNNING job for this
     target, the new trigger is skipped (prevents fan-out storms on big baselines)."""
     from apps.events.models import Event
-    from apps.jobs.models import ScanJob
 
     try:
         event = Event.objects.select_related("target").get(pk=event_id)
@@ -579,7 +716,7 @@ def reconcile_target(target_id):
     """Periodic reconciliation: detect removed assets (stale last_seen), refresh state."""
     from datetime import timedelta
 
-    from apps.assets.models import HTTPService, Port, Subdomain
+    from apps.assets.models import Port, Subdomain
     from services.event_engine.engine import emit_event
 
     job, target = _job(target_id, "reconcile", tool="internal")
@@ -587,7 +724,19 @@ def reconcile_target(target_id):
     if not ok:
         _finish(job, "SKIPPED", error=reason)
         return {"status": "SKIPPED", "reason": reason}
-    cutoff = timezone.now() - timedelta(days=14)
+    # Task 11: never reconcile a target that never completed a scan — fresh
+    # targets would otherwise get all assets marked REMOVED on first run.
+    from apps.jobs.models import ScanJob, ScanRun
+    has_history = (
+        ScanRun.objects.filter(target=target, status="COMPLETED").exists()
+        or ScanJob.objects.filter(target=target, status=ScanJob.STATUS_COMPLETED).exists()
+        or getattr(target, "baseline_status", "") == "BASELINE_COMPLETE"
+    )
+    if not has_history:
+        _finish(job, "SKIPPED", error="no_baseline_yet: no completed scan history")
+        return {"status": "SKIPPED", "reason": "no_baseline_yet"}
+    grace = getattr(target, "reconciliation_grace_days", 14) or 14
+    cutoff = timezone.now() - timedelta(days=grace)
     removed = 0
     for sub in Subdomain.objects.filter(target=target, is_active=True, last_seen__lt=cutoff)[:500]:
         sub.is_active = False
@@ -609,7 +758,9 @@ def reconcile_target(target_id):
                    old_state={"state": "open"}, new_state={"state": "closed"})
         removed += 1
     # HTTP + URL + JS removal (TASK-015/019/023)
-    from apps.assets.models import HTTPService as _HTTP, JavaScriptAsset as _JS, URLAsset as _URL
+    from apps.assets.models import HTTPService as _HTTP
+    from apps.assets.models import JavaScriptAsset as _JS
+    from apps.assets.models import URLAsset as _URL
     for svc in _HTTP.objects.filter(target=target).exclude(state__in=["INACTIVE", "REMOVED"]).filter(last_seen__lt=cutoff)[:200]:
         svc.state = "REMOVED"
         svc.last_changed = timezone.now()
@@ -629,6 +780,34 @@ def reconcile_target(target_id):
         j.save(update_fields=["state", "last_changed"])
         emit_event("JS_REMOVED", target=target, asset_type="JS_FILE", asset_id=j.id,
                    asset_value=j.js_url, source="reconcile")
+        removed += 1
+    # Task 9: IP + API endpoint reconciliation (IP_REMOVED / API_ENDPOINT_REMOVED
+    # were defined but never emitted; is_active never flipped back).
+    from apps.assets.models import APIEndpoint as _API
+    from apps.assets.models import DNSRecord as _DNS
+    from apps.assets.models import IPAddress as _IP
+    for ip in _IP.objects.filter(target=target, is_active=True, last_seen__lt=cutoff)[:500]:
+        # Edge: an IP shared by several hostnames must not be removed while any
+        # live DNS record still points at it — only the hostname went stale.
+        if _DNS.objects.filter(target=target, value=ip.ip,
+                               record_type__in=["A", "AAAA"],
+                               last_seen__gte=cutoff).exists():
+            continue
+        ip.is_active = False
+        ip.state = "REMOVED"
+        ip.save(update_fields=["is_active", "state"])
+        emit_event("IP_REMOVED", target=target, asset_type="IP", asset_id=ip.id,
+                   asset_value=ip.ip, source="reconcile",
+                   old_state={"ip": ip.ip, "state": "ACTIVE"},
+                   new_state={"ip": ip.ip, "state": "REMOVED"})
+        removed += 1
+    for ep in _API.objects.filter(target=target).exclude(
+            state__in=["INACTIVE", "REMOVED"]).filter(last_seen__lt=cutoff)[:500]:
+        ep.state = "REMOVED"
+        ep.save(update_fields=["state"])
+        emit_event("API_ENDPOINT_REMOVED", target=target, asset_type="API_ENDPOINT",
+                   asset_id=ep.id, asset_value=ep.url[:500], source="reconcile",
+                   evidence={"method": ep.method, "api_type": ep.api_type})
         removed += 1
     _finish(job, "COMPLETED", stats={"marked_inactive": removed})
     return {"status": "COMPLETED", "marked_inactive": removed}
@@ -723,6 +902,12 @@ def process_new_ip(target_id, ip, trigger="event"):
     ok, reason = validate_ip(target, ip, rules)
     if not ok:
         return {"status": "SKIPPED", "reason": f"scope: {reason}"}
+    # T5: shared-infrastructure IP (also claimed by another target) needs an
+    # explicit confirmed_dedicated=True before any active port scan.
+    from apps.assets.models import IPAddress as _IP
+    rec = _IP.objects.filter(target=target, ip=ip).first()
+    if rec is not None and rec.shared_suspect and not rec.confirmed_dedicated:
+        return {"status": "SKIPPED", "reason": "shared_ip_unconfirmed"}
     job, msg = _asset_job(target, "ports", "IP", ip, trigger, tool="naabu/socket")
     if job is None:
         return {"status": "SKIPPED", "reason": msg}
@@ -780,33 +965,32 @@ def probe_http_targets(target_id, urls, trigger="event"):
         return {"status": "SKIPPED", "reason": msg}
     entries = []
     from services.tool_adapters.adapters import HttpxAdapter
+    from services.tool_adapters.base import redact_command
 
     adapter = HttpxAdapter()
     if adapter.is_available() and urls:
-        import subprocess as _sp
-
+        # Task 13: single adapter.run(hosts) path (stdin piped, redacted cmd logged).
+        job.command_redacted = redact_command(adapter.build_command(urls[:50]))
+        job.save(update_fields=["command_redacted"])
         try:
-            p = _sp.run([adapter.binary, "-silent", "-json", "-title", "-tech-detect",
-                         "-status-code", "-server", "-ip"], input="\n".join(urls[:50]),
-                        capture_output=True, text=True, timeout=300)
-            import json as _json
-
-            for line in p.stdout.splitlines():
-                try:
-                    entries.append(_json.loads(line))
-                except Exception:
-                    continue
+            res = adapter.run(urls[:50], timeout=300)
+            if res.status == "FAILED":
+                _log(job, "ERROR", f"httpx failed: {res.error}", stage="http", tool="httpx")
+            else:
+                entries.extend(o for o in res.data if isinstance(o, dict))
         except Exception as e:
             _log(job, "ERROR", f"httpx failed: {e}", stage="http", tool="httpx")
     if not entries:
-        import ssl as _ssl
         import urllib.request as _urlreq
 
         for url in (urls or [])[:50]:
             try:
-                ctx = _ssl.create_default_context()
-                ctx.check_hostname = False
-                ctx.verify_mode = _ssl.CERT_NONE
+                # T2+T4: per-asset URLs still get scope + SSRF pre-checks.
+                ok, reason, _h = _url_allowed_for_fetch(target, url)
+                if not ok:
+                    _log(job, "INFO", f"skipped probe {url[:200]}: {reason}", stage="http", tool="urllib")
+                    continue
+                ctx = _ssl_context_for(target, job, stage="http")  # T3
                 req = _urlreq.Request(url, headers={"User-Agent": "recon-monitor/1.0"})
                 with _urlreq.urlopen(req, timeout=8, context=ctx) as r:
                     entries.append({"url": url, "status_code": r.status, "title": "",
@@ -823,14 +1007,7 @@ def probe_http_targets(target_id, urls, trigger="event"):
 @shared_task(name="apps.jobs.tasks.host_url_discovery", queue="recon")
 def host_url_discovery(target_id, url, trigger="event"):
     """Crawl a single HTTP service: katana + <script> extraction + JS ingest."""
-    import re
-    import ssl as _ssl
-    import urllib.request as _urlreq
-    from urllib.parse import urlparse as _urlparse
-
-    from apps.assets.models import HTTPService
     from apps.targets.models import Target
-    from services.correlation.ingest import ingest_js
 
     try:
         target = Target.objects.get(pk=target_id)
@@ -856,39 +1033,20 @@ def host_url_discovery(target_id, url, trigger="event"):
         except Exception as e:
             _log(job, "ERROR", f"katana failed: {e}", stage="urls", tool="katana")
     new_urls, new_apis = ingest_urls(target, items)
-    # script-src JS extraction from the page itself
+    # script-src JS extraction from the page itself (T2: shared scoped helper).
     js_count = 0
     try:
-        ctx = _ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = _ssl.CERT_NONE
-        req = _urlreq.Request(url, headers={"User-Agent": "recon-monitor/1.0"})
-        with _urlreq.urlopen(req, timeout=10, context=ctx) as r:
-            html = r.read().decode("utf-8", errors="ignore")[:500000]
-        p = _urlparse(url)
-        for m in re.finditer(r'<script[^>]+src=["\']([^"\']+)["\']', html, re.IGNORECASE):
-            src = m.group(1)
-            if src.startswith("//"):
-                src = "https:" + src
-            elif src.startswith("/"):
-                src = f"{p.scheme}://{p.netloc}{src}"
-            elif not src.startswith("http"):
-                continue
-            try:
-                rq = _urlreq.Request(src, headers={"User-Agent": "recon-monitor/1.0"})
-                with _urlreq.urlopen(rq, timeout=10, context=ctx) as r2:
-                    body = r2.read()[:2000000]
-                js, outcome = ingest_js(target, src, body, source="crawler")
-                try:
-                    js.discovered_from = url[:2000]
-                    js.save(update_fields=["discovered_from"])
-                except Exception:
-                    pass
-                js_count += 1
-            except Exception:
-                continue
+        raw = _fetch_url_for_recon(target, url, job=job, stage="js",
+                                   timeout=10, max_bytes=500000)
+    except _ReconFetchSkipped as e:
+        _log(job, "INFO", f"skipped page {url[:200]}: {e}", stage="js")
+        raw = b""
     except Exception as e:
         _log(job, "ERROR", f"page fetch failed for {url}: {e}", stage="js")
+        raw = b""
+    if raw:
+        js_count = _extract_and_ingest_scripts(target, raw.decode("utf-8", errors="ignore"),
+                                               url, job=job, source="crawler")
     _finish(job, "COMPLETED", stats={"new_urls": new_urls, "new_apis": new_apis, "js": js_count})
     return {"status": "COMPLETED", "new_urls": new_urls, "js": js_count}
 

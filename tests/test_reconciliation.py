@@ -105,3 +105,124 @@ class ChangeScenarioTests(TestCase):
         from apps.assets.models import CVE
         for c in CVE.objects.filter(target=t):
             self.assertNotEqual(c.status, "validated")
+
+
+class IpApiReconciliationTests(TestCase):
+    """Task 9: IPAddress + APIEndpoint lifecycle (IP_REMOVED/API_ENDPOINT_REMOVED)."""
+
+    def _authorized_target(self, name):
+        return Target.objects.create(name=name, root_domain=f"{name}.invalid",
+                                     authorization_status=Target.AUTH_AUTHORIZED)
+
+    def _stale(self, model, **kw):
+        from datetime import timedelta
+
+        from django.utils import timezone
+        obj = model.objects.create(**kw)
+        model.objects.filter(pk=obj.pk).update(
+            last_seen=timezone.now() - timedelta(days=30))
+        obj.refresh_from_db()
+        return obj
+
+    def test_ip_reconciliation_marks_removed(self):
+        from apps.assets.models import IPAddress
+        from apps.events.models import Event
+        from apps.jobs.models import ScanJob
+        from apps.jobs.tasks import reconcile_target
+        t = self._authorized_target("iprec")
+        ScanJob.objects.create(target=t, job_type="dns", status=ScanJob.STATUS_COMPLETED)
+        ip = self._stale(IPAddress, target=t, ip="192.0.2.9")
+        out = reconcile_target(t.id)
+        self.assertEqual(out["status"], "COMPLETED")
+        ip.refresh_from_db()
+        self.assertFalse(ip.is_active)
+        self.assertEqual(ip.state, "REMOVED")
+        self.assertTrue(Event.objects.filter(event_type="IP_REMOVED", target=t).exists())
+
+    def test_ip_with_live_dns_record_kept(self):
+        """Task 9 edge: IP still referenced by a fresh DNS record is NOT removed."""
+        from apps.assets.models import DNSRecord, IPAddress
+        from apps.jobs.models import ScanJob
+        from apps.jobs.tasks import reconcile_target
+        t = self._authorized_target("ipkeep")
+        ScanJob.objects.create(target=t, job_type="dns", status=ScanJob.STATUS_COMPLETED)
+        ip = self._stale(IPAddress, target=t, ip="192.0.2.10")
+        DNSRecord.objects.create(target=t, hostname="x.ipkeep.invalid",
+                                 record_type="A", value="192.0.2.10")
+        reconcile_target(t.id)
+        ip.refresh_from_db()
+        self.assertTrue(ip.is_active)
+
+    def test_api_endpoint_reconciliation_marks_removed(self):
+        from apps.assets.models import APIEndpoint
+        from apps.events.models import Event
+        from apps.jobs.models import ScanJob
+        from apps.jobs.tasks import reconcile_target
+        t = self._authorized_target("apirec")
+        ScanJob.objects.create(target=t, job_type="urls", status=ScanJob.STATUS_COMPLETED)
+        ep = self._stale(APIEndpoint, target=t, url="https://apirec.invalid/api/v1/x",
+                         host="apirec.invalid", method="GET")
+        reconcile_target(t.id)
+        ep.refresh_from_db()
+        self.assertEqual(ep.state, "REMOVED")
+        self.assertTrue(Event.objects.filter(event_type="API_ENDPOINT_REMOVED", target=t).exists())
+
+
+class ReconcileGraceTests(TestCase):
+    """Task 11: configurable grace + no-baseline gate."""
+
+    def test_no_baseline_yet_skipped(self):
+        from apps.jobs.tasks import reconcile_target
+        t = Target.objects.create(name="fresh", root_domain="fresh.invalid",
+                                  authorization_status=Target.AUTH_AUTHORIZED)
+        out = reconcile_target(t.id)
+        self.assertEqual(out["status"], "SKIPPED")
+        self.assertEqual(out["reason"], "no_baseline_yet")
+
+    def test_custom_grace_respected(self):
+        from datetime import timedelta
+
+        from django.utils import timezone
+
+        from apps.assets.models import Subdomain
+        from apps.events.models import Event
+        from apps.jobs.models import ScanJob
+        from apps.jobs.tasks import reconcile_target
+        t = Target.objects.create(name="grace", root_domain="grace.invalid",
+                                  authorization_status=Target.AUTH_AUTHORIZED,
+                                  reconciliation_grace_days=30)
+        ScanJob.objects.create(target=t, job_type="dns", status=ScanJob.STATUS_COMPLETED)
+        Subdomain.objects.create(target=t, hostname="old.grace.invalid")
+        Subdomain.objects.filter(target=t).update(
+            last_seen=timezone.now() - timedelta(days=20))
+        reconcile_target(t.id)
+        sub = Subdomain.objects.get(target=t)
+        self.assertTrue(sub.is_active)  # 20d < 30d grace
+        self.assertFalse(Event.objects.filter(event_type="SUBDOMAIN_REMOVED").exists())
+        t.reconciliation_grace_days = 14
+        t.save(update_fields=["reconciliation_grace_days"])
+        reconcile_target(t.id)
+        sub.refresh_from_db()
+        self.assertFalse(sub.is_active)  # 20d > 14d grace
+
+
+class UrlLastSeenTests(TestCase):
+    """Task 10: re-observed URLs/APIs get last_seen bumped."""
+
+    def test_reingest_bumps_last_seen(self):
+        from datetime import timedelta
+
+        from django.utils import timezone
+
+        from apps.assets.models import APIEndpoint, URLAsset
+        from services.correlation.ingest import ingest_urls
+        t = Target.objects.create(name="seen", root_domain="seen.invalid")
+        ingest_urls(t, [{"url": "https://seen.invalid/api/v1/a", "source": "gau"}])
+        past = timezone.now() - timedelta(hours=1)
+        URLAsset.objects.filter(target=t).update(last_seen=past)
+        APIEndpoint.objects.filter(target=t).update(last_seen=past)
+        ingest_urls(t, [{"url": "https://seen.invalid/api/v1/a", "source": "katana"}])
+        u = URLAsset.objects.get(target=t)
+        self.assertGreater(u.last_seen, past)
+        ep = APIEndpoint.objects.get(target=t)
+        self.assertGreater(ep.last_seen, past)

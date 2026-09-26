@@ -1,6 +1,8 @@
 """Event engine models: persistent events + alert deliveries."""
 from django.db import models
 
+from apps.core.target_scoping import TargetScopedManager
+
 
 class Event(models.Model):
     EVENT_TYPES = [
@@ -42,6 +44,8 @@ class Event(models.Model):
 
     event_type = models.CharField(max_length=32, db_index=True)
     target = models.ForeignKey("targets.Target", null=True, blank=True, on_delete=models.CASCADE, related_name="events")
+    objects = TargetScopedManager()
+    all_objects = models.Manager()
     asset_type = models.CharField(max_length=32, default="", blank=True)
     asset_id = models.IntegerField(null=True, blank=True)
     asset_value = models.CharField(max_length=2048, default="", blank=True, db_index=True)
@@ -89,6 +93,8 @@ class Alert(models.Model):
     ]
     event = models.ForeignKey(Event, on_delete=models.CASCADE, related_name="alerts")
     target = models.ForeignKey("targets.Target", null=True, blank=True, on_delete=models.CASCADE, related_name="alerts")
+    objects = TargetScopedManager()
+    all_objects = models.Manager()
     channel = models.CharField(max_length=32, default="discord")
     status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_PENDING, db_index=True)
     payload_preview = models.TextField(default="", blank=True)

@@ -1,0 +1,54 @@
+# Task 32: deployment-config smoke — catches the Task 15/16/26 class of bugs
+# that unit tests cannot see. Asserts exit codes and log content, not just "ran".
+name: deploy-smoke
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  prod-settings-gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.lock.txt
+      - name: production check must FAIL with no secrets (Tasks 15/16)
+        run: |
+          set +e
+          DJANGO_SETTINGS_MODULE=config.settings.production python manage.py check 2>&1 | tee /tmp/prod-check.log
+          code=${PIPESTATUS[0]}
+          if [ "$code" -eq 0 ]; then echo "FAIL: production check passed without secrets"; exit 1; fi
+          grep -q "ImproperlyConfigured" /tmp/prod-check.log || { echo "FAIL: expected ImproperlyConfigured"; exit 1; }
+          echo "OK: production refuses to boot without secrets"
+      - name: production check must PASS with secrets
+        run: |
+          DJANGO_SETTINGS_MODULE=config.settings.production \
+            DJANGO_SECRET_KEY=test-only-not-a-real-secret \
+            ALLOWED_HOSTS=app.example.com \
+            python manage.py check
+
+  compose-fail-fast:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: compose must fail fast without .env secrets (Task 26)
+        run: |
+          cd docker
+          rm -f .env
+          set +e
+          docker compose config 2>&1 | tee /tmp/compose.log
+          code=${PIPESTATUS[0]}
+          if [ "$code" -eq 0 ]; then echo "FAIL: compose booted without secrets"; exit 1; fi
+          grep -qiE "POSTGRES_PASSWORD|DJANGO_SECRET_KEY|variable is not set" /tmp/compose.log \
+            || { echo "FAIL: expected missing-secret error"; exit 1; }
+          echo "OK: compose fails fast without secrets"
+      - name: compose config succeeds with example-derived .env
+        run: |
+          cd docker
+          sed -e 's/CHANGE-ME.*/testvalue1234567890/' .env.docker.example > .env
+          docker compose config > /dev/null
+          rm -f .env
+          echo "OK: compose config valid with secrets present"

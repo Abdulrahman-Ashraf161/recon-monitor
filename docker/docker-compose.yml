@@ -1,10 +1,18 @@
+# Production compose (Task 26). ALL secrets are required environment — there are
+# no working defaults here, so `docker compose up` without a filled .env fails
+# fast instead of booting DEBUG=True / POSTGRES_PASSWORD=recon.
+#
+#   cd docker && cp .env.docker.example .env   # fill in REAL secrets
+#   docker compose up -d --build
+#
+# Dev loop: see docker-compose.override.yml.example (throwaway creds, separate file).
 services:
   db:
     image: postgres:16
     environment:
-      POSTGRES_DB: recon
-      POSTGRES_USER: recon
-      POSTGRES_PASSWORD: recon
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB in docker/.env}
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in docker/.env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in docker/.env}
     volumes:
       - pgdata:/var/lib/postgresql/data
   redis:
@@ -14,10 +22,14 @@ services:
       context: ..
       dockerfile: docker/Dockerfile
     environment:
-      DATABASE_URL: postgres://recon:recon@db:5432/recon
+      DJANGO_SETTINGS_MODULE: production
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?set DJANGO_SECRET_KEY in docker/.env}
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:?set ALLOWED_HOSTS in docker/.env}
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in docker/.env}
       REDIS_URL: redis://redis:6379/0
       CELERY_TASK_ALWAYS_EAGER: "False"
       USE_REDIS_CHANNELS: "True"
+      CSRF_TRUSTED_ORIGINS: ${CSRF_TRUSTED_ORIGINS:-}
     ports:
       - "8000:8000"
     depends_on:
@@ -29,7 +41,10 @@ services:
       dockerfile: docker/Dockerfile
     command: celery -A config worker -l info
     environment:
-      DATABASE_URL: postgres://recon:recon@db:5432/recon
+      DJANGO_SETTINGS_MODULE: production
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?set DJANGO_SECRET_KEY in docker/.env}
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:?set ALLOWED_HOSTS in docker/.env}
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in docker/.env}
       REDIS_URL: redis://redis:6379/0
       CELERY_TASK_ALWAYS_EAGER: "False"
     depends_on:
@@ -41,7 +56,10 @@ services:
       dockerfile: docker/Dockerfile
     command: celery -A config beat -l info
     environment:
-      DATABASE_URL: postgres://recon:recon@db:5432/recon
+      DJANGO_SETTINGS_MODULE: production
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?set DJANGO_SECRET_KEY in docker/.env}
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:?set ALLOWED_HOSTS in docker/.env}
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in docker/.env}
       REDIS_URL: redis://redis:6379/0
     depends_on:
       - db

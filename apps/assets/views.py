@@ -1,4 +1,15 @@
-"""Asset inventory list/detail views with search, filters, pagination (target-scoped)."""
+"""Asset inventory list/detail views with search, filters, pagination.
+
+Target scoping (Tasks 7/20/22):
+- List views share scoped_list_view(): validated ?target= scoping (Task 22),
+  identical query-param names, paginated results. Global (unscoped) lists are
+  cross-target BY DESIGN while SINGLE_TENANT_ALL_TARGETS=True (single-tenant
+  install: every authenticated viewer may see every target).
+- Detail views enforce the caller's target context server-side (Task 7):
+  explicit ?target= OR the picker's session target; mismatch -> 403.
+"""
+from django.conf import settings as djsettings
+from django.contrib import messages
 from django.core.exceptions import PermissionDenied
 from django.core.paginator import Paginator
 from django.shortcuts import get_object_or_404, render
@@ -6,15 +17,41 @@ from django.shortcuts import get_object_or_404, render
 from apps.core.permissions import require_viewer
 from apps.targets.models import Target
 
-from .models import (APIEndpoint, CVE, HTTPService, IPAddress, JavaScriptAsset,
-                     JavaScriptVersion, Port, SecurityFinding, Subdomain, Technology,
-                     URLAsset)
+from .models import (
+    CVE,
+    APIEndpoint,
+    HTTPService,
+    IPAddress,
+    JavaScriptAsset,
+    Port,
+    SecurityFinding,
+    Subdomain,
+    Technology,
+    URLAsset,
+)
+
+
+def scoped_queryset(request, qs, target_field="target"):
+    """Task 22: validate ?target= instead of trusting the raw string.
+
+    Returns (queryset, target_id, notice). Invalid or nonexistent ids yield
+    qs.none() + a visible notice — never a 500, never silent wrong data.
+    """
+    target_id = request.GET.get("target", "")
+    if not target_id:
+        return qs, "", ""
+    if not target_id.isdigit():
+        messages.warning(request, "Invalid target selected — showing nothing.")
+        return qs.none(), target_id, "Invalid target — showing nothing."
+    if not Target.objects.filter(pk=int(target_id)).exists():
+        messages.warning(request, "Target not found — showing nothing.")
+        return qs.none(), target_id, "Target not found — showing nothing."
+    return qs.filter(**{f"{target_field}_id": int(target_id)}), target_id, ""
 
 
 def _filtered(request, qs, target_field="target"):
-    target_id = request.GET.get("target", "")
-    if target_id:
-        qs = qs.filter(**{f"{target_field}_id": target_id})
+    """Backwards-compatible wrapper (Task 20): same return shape as before."""
+    qs, target_id, _notice = scoped_queryset(request, qs, target_field)
     return qs, target_id
 
 
@@ -25,6 +62,61 @@ def _paginate(request, qs, per_page=25):
 
 def _ctx_targets(target_id):
     return {"targets": Target.objects.all(), "target_id": target_id}
+
+
+def _deny_on_context_mismatch(request, obj):
+    """Task 7: enforce the caller's target context server-side.
+
+    Context = explicit ?target=, else the target picker's session value.
+    Mismatch -> 403 (closes "IDOR by omission": detail URLs without ?target=
+    no longer serve other targets' objects once a context exists).
+    No context at all is allowed ONLY because SINGLE_TENANT_ALL_TARGETS=True;
+    flip that setting (multi-tenant) and context becomes mandatory.
+    """
+    ctx = (request.GET.get("target", "")
+           or request.session.get("active_target_id", "")
+           or request.session.get("current_target_id", ""))
+    if ctx and str(getattr(obj, "target_id", "")) != str(ctx):
+        raise PermissionDenied(
+            "Cross-target access denied: this object belongs to another target. "
+            "Switch targets with the target picker and retry.")
+    if not ctx and not getattr(djsettings, "SINGLE_TENANT_ALL_TARGETS", True):
+        raise PermissionDenied("Target context required.")
+
+
+def scoped_list_view(request, model, template, order_by=None, search_lookup=None,
+                     exact_filters=None, extra_context=None):
+    """Task 20: one shared list implementation for all asset types.
+
+    - model: asset model (must have target FK for scoping).
+    - order_by: field name(s) for deterministic ordering.
+    - search_lookup: ORM lookup for the ?q= box (e.g. "hostname__icontains").
+    - exact_filters: {query_param: ORM lookup or None}; None preserves params
+      that are accepted-but-unfiltered (e.g. subdomain ?status= quirk).
+    Query-param names and context keys are identical to the pre-refactor views.
+    """
+    qs = model.objects.select_related("target").all()
+    if order_by:
+        qs = qs.order_by(*order_by) if isinstance(order_by, (list, tuple)) else qs.order_by(order_by)
+    qs, target_id, notice = scoped_queryset(request, qs)
+    applied = {}
+    for param, lookup in (exact_filters or {}).items():
+        v = request.GET.get(param, "")
+        applied[param] = v
+        if v and lookup:
+            qs = qs.filter(**{lookup: v})
+    q = ""
+    if search_lookup:
+        q = request.GET.get("q", "")
+        if q:
+            qs = qs.filter(**{search_lookup: q})
+    page = _paginate(request, qs)
+    ctx = {"page": page, "q": q, **_ctx_targets(target_id), **applied}
+    if notice:
+        ctx["target_notice"] = notice
+    if extra_context:
+        ctx.update(extra_context() if callable(extra_context) else extra_context)
+    return render(request, template, ctx)
 
 
 @require_viewer
@@ -53,76 +145,38 @@ def asset_detail(request, pk):
     return render(request, "assets/detail.html", {"asset": a})
 
 
-def _deny_on_context_mismatch(request, obj):
-    """TASK-042/078: when caller supplies explicit target context, enforce it server-side."""
-    ctx = request.GET.get("target", "")
-    if ctx and str(getattr(obj, "target_id", "")) != str(ctx):
-        raise PermissionDenied("cross-target access denied")
-
-
 @require_viewer
 def subdomain_list(request):
-    qs = Subdomain.objects.select_related("target").order_by("hostname")
-    qs, target_id = _filtered(request, qs)
-    for f, lookup in (("status", None), ("source", "sources__icontains"), ("q", "hostname__icontains")):
-        v = request.GET.get(f, "")
-        if v and lookup:
-            qs = qs.filter(**{lookup: v})
-    page = _paginate(request, qs)
-    return render(request, "assets/subdomains.html", {"page": page, **_ctx_targets(target_id),
-                                                     "q": request.GET.get("q", "")})
+    return scoped_list_view(request, Subdomain, "assets/subdomains.html", order_by="hostname",
+                            search_lookup="hostname__icontains",
+                            exact_filters={"status": None, "source": "sources__icontains"})
 
 
 @require_viewer
 def port_list(request):
-    qs = Port.objects.select_related("target").order_by("ip", "port")
-    qs, target_id = _filtered(request, qs)
-    state = request.GET.get("state", "")
-    if state:
-        qs = qs.filter(state=state)
-    q = request.GET.get("q", "")
-    if q:
-        qs = qs.filter(ip__icontains=q)
-    return render(request, "assets/ports.html", {"page": _paginate(request, qs), **_ctx_targets(target_id),
-                                                 "state": state, "q": q})
+    return scoped_list_view(request, Port, "assets/ports.html", order_by=("ip", "port"),
+                            search_lookup="ip__icontains",
+                            exact_filters={"state": "state"})
 
 
 @require_viewer
 def http_list(request):
-    qs = HTTPService.objects.select_related("target").order_by("-last_seen")
-    qs, target_id = _filtered(request, qs)
-    status = request.GET.get("status", "")
-    if status:
-        qs = qs.filter(status_code=status)
-    q = request.GET.get("q", "")
-    if q:
-        qs = qs.filter(url__icontains=q)
-    return render(request, "assets/http.html", {"page": _paginate(request, qs), **_ctx_targets(target_id),
-                                                "status": status, "q": q})
+    return scoped_list_view(request, HTTPService, "assets/http.html", order_by="-last_seen",
+                            search_lookup="url__icontains",
+                            exact_filters={"status": "status_code"})
 
 
 @require_viewer
 def url_list(request):
-    qs = URLAsset.objects.select_related("target").order_by("-last_seen")
-    qs, target_id = _filtered(request, qs)
-    source = request.GET.get("source", "")
-    if source:
-        qs = qs.filter(source=source)
-    q = request.GET.get("q", "")
-    if q:
-        qs = qs.filter(canonical_url__icontains=q)
-    return render(request, "assets/urls.html", {"page": _paginate(request, qs), **_ctx_targets(target_id),
-                                                "source": source, "q": q})
+    return scoped_list_view(request, URLAsset, "assets/urls.html", order_by="-last_seen",
+                            search_lookup="canonical_url__icontains",
+                            exact_filters={"source": "source"})
 
 
 @require_viewer
 def api_list(request):
-    qs = APIEndpoint.objects.select_related("target").order_by("-last_seen")
-    qs, target_id = _filtered(request, qs)
-    q = request.GET.get("q", "")
-    if q:
-        qs = qs.filter(url__icontains=q)
-    return render(request, "assets/apis.html", {"page": _paginate(request, qs), **_ctx_targets(target_id), "q": q})
+    return scoped_list_view(request, APIEndpoint, "assets/apis.html", order_by="-last_seen",
+                            search_lookup="url__icontains")
 
 
 @require_viewer
@@ -130,7 +184,7 @@ def js_list(request):
     from apps.jobs.models import JSAnalysisJob
 
     qs = JavaScriptAsset.objects.select_related("target").order_by("-last_seen")
-    qs, target_id = _filtered(request, qs)
+    qs, target_id, notice = scoped_queryset(request, qs)
     q = request.GET.get("q", "")
     if q:
         qs = qs.filter(js_url__icontains=q)
@@ -141,20 +195,29 @@ def js_list(request):
         latest.setdefault(aj.js_id, aj)
     for j in page:
         j.latest_job = latest.get(j.id)
+    # Task 8: totals honor the same target scope as the list itself.
+    if target_id and str(target_id).isdigit():
+        js_scope = JavaScriptAsset.objects.filter(target_id=int(target_id))
+        job_scope = JSAnalysisJob.objects.filter(js__target_id=int(target_id))
+    else:
+        js_scope = JavaScriptAsset.objects.all()
+        job_scope = JSAnalysisJob.objects.all()
     totals = {
-        "total": JavaScriptAsset.objects.count(),
-        "queued": JSAnalysisJob.objects.filter(status="QUEUED").count(),
-        "running": JSAnalysisJob.objects.filter(status="RUNNING").count(),
-        "completed": JSAnalysisJob.objects.filter(status="COMPLETED").count(),
-        "failed": JSAnalysisJob.objects.filter(status="FAILED").count(),
+        "total": js_scope.count(),
+        "queued": job_scope.filter(status="QUEUED").count(),
+        "running": job_scope.filter(status="RUNNING").count(),
+        "completed": job_scope.filter(status="COMPLETED").count(),
+        "failed": job_scope.filter(status="FAILED").count(),
     }
-    return render(request, "assets/js.html", {"page": page, **_ctx_targets(target_id), "q": q,
-                                              "latest": latest, "totals": totals})
+    ctx = {"page": page, **_ctx_targets(target_id), "q": q,
+           "latest": latest, "totals": totals}
+    if notice:
+        ctx["target_notice"] = notice
+    return render(request, "assets/js.html", ctx)
 
 
 @require_viewer
 def js_scan_detail(request, pk):
-    from apps.jobs.models import JSAnalysisJob
 
     js = get_object_or_404(JavaScriptAsset, pk=pk)
     _deny_on_context_mismatch(request, js)
@@ -187,44 +250,23 @@ def js_diff(request, pk):
 
 @require_viewer
 def tech_list(request):
-    qs = Technology.objects.select_related("target").order_by("product")
-    qs, target_id = _filtered(request, qs)
-    q = request.GET.get("q", "")
-    if q:
-        qs = qs.filter(product__icontains=q)
-    return render(request, "assets/tech.html", {"page": _paginate(request, qs), **_ctx_targets(target_id), "q": q})
+    return scoped_list_view(request, Technology, "assets/tech.html", order_by="product",
+                            search_lookup="product__icontains")
 
 
 @require_viewer
 def cve_list(request):
-    qs = CVE.objects.select_related("target").order_by("-first_seen")
-    qs, target_id = _filtered(request, qs)
-    status = request.GET.get("status", "")
-    if status:
-        qs = qs.filter(status=status)
-    q = request.GET.get("q", "")
-    if q:
-        qs = qs.filter(cve_id__icontains=q)
-    return render(request, "assets/cves.html", {"page": _paginate(request, qs), **_ctx_targets(target_id),
-                                                "status": status, "q": q})
+    return scoped_list_view(request, CVE, "assets/cves.html", order_by="-first_seen",
+                            search_lookup="cve_id__icontains",
+                            exact_filters={"status": "status"})
 
 
 @require_viewer
 def finding_list(request):
-    qs = SecurityFinding.objects.select_related("target").order_by("-first_seen")
-    qs, target_id = _filtered(request, qs)
-    sev = request.GET.get("severity", "")
-    if sev:
-        qs = qs.filter(severity=sev)
-    status = request.GET.get("status", "")
-    if status:
-        qs = qs.filter(status=status)
-    return render(request, "assets/findings.html", {"page": _paginate(request, qs), **_ctx_targets(target_id),
-                                                    "severity": sev, "status": status})
+    return scoped_list_view(request, SecurityFinding, "assets/findings.html", order_by="-first_seen",
+                            exact_filters={"severity": "severity", "status": "status"})
 
 
 @require_viewer
 def ip_list(request):
-    qs = IPAddress.objects.select_related("target").order_by("ip")
-    qs, target_id = _filtered(request, qs)
-    return render(request, "assets/ips.html", {"page": _paginate(request, qs), **_ctx_targets(target_id)})
+    return scoped_list_view(request, IPAddress, "assets/ips.html", order_by="ip")

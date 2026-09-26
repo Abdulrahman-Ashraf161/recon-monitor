@@ -1,10 +1,11 @@
 """State comparison + persistence: every ingest compares against stored state,
 emits events only on meaningful change, updates first_seen/last_seen/last_changed."""
 import logging
+
 from django.utils import timezone
 
 from services.event_engine.engine import emit_event
-from services.normalization.hosts import dedup_hostnames, normalize_hostname
+from services.normalization.hosts import dedup_hostnames
 from services.normalization.urls import canonicalize_url, classify_api
 from services.scope_engine.validator import validate_host, validate_ip
 
@@ -87,7 +88,6 @@ def detect_wildcard(target, resolver=None):
     """Generate random labels, resolve; if they consistently resolve -> wildcard."""
     import secrets
 
-    import requests
 
     labels = [f"rand-{secrets.token_hex(4)}-{i}" for i in range(3)]
     ips = set()
@@ -134,7 +134,18 @@ def ingest_dns(target, records):
         else:
             _touch(rec) if hasattr(rec, "last_seen") else None
         if rtype in ("A", "AAAA"):
-            ip, ip_created = IPAddress.objects.get_or_create(target=target, ip=val)
+            # T5 edge: normalize IPv6/IPv4-mapped forms so ::ffff:1.2.3.4 can't
+            # dodge the same-IP check against 1.2.3.4.
+            try:
+                import ipaddress as _ip
+                val = str(_ip.ip_address(val.strip()))
+            except ValueError:
+                continue
+            # T5: same IP already tied to a different target => shared infra suspect.
+            # First target to claim an IP scans normally (no retro-flagging here).
+            shared = IPAddress.objects.filter(ip=val).exclude(target=target).exists()
+            ip, ip_created = IPAddress.objects.get_or_create(target=target, ip=val,
+                                                             defaults={"shared_suspect": shared})
             if ip_created:
                 hosts = ip.source_hostnames or []
                 if host not in hosts:
@@ -147,6 +158,9 @@ def ingest_dns(target, records):
                            asset_value=val, source="dnsx", evidence={"hostname": host},
                            new_state={"ip": val, "hostname": host})
             else:
+                if shared and not ip.shared_suspect:
+                    ip.shared_suspect = True
+                    ip.save(update_fields=["shared_suspect"])
                 hosts = ip.source_hostnames or []
                 updated = False
                 if host not in hosts:
@@ -317,45 +331,79 @@ def ingest_http(target, entries):
 
 
 def ingest_urls(target, items):
-    from apps.assets.models import APIEndpoint, URLAsset
+    """Normalize, scope-validate (T1), and persist discovered URLs + API endpoints.
 
+    T1: every host is checked with validate_host() before persistence — Wayback /
+    Common Crawl / katana output routinely contains third-party hosts.
+    T10: re-observed rows get last_seen bumped so reconciliation stays honest.
+    T12: per-item try/except — one malformed URL never aborts the batch.
+    """
+    from urllib.parse import urlparse
+
+    from apps.assets.models import APIEndpoint, URLAsset
+    from services.scope_engine.validator import validate_host
+
+    rules = list(target.scope_rules.all())
     new_urls = new_apis = 0
     for item in items:
-        raw = item.get("url", "")
-        canon = canonicalize_url(raw)
-        if not canon:
+        try:
+            raw = item.get("url", "")
+            canon = canonicalize_url(raw)
+            if not canon:
+                continue
+            source = item.get("source", "")
+            try:
+                host = (urlparse(canon).hostname or "").lower().rstrip(".")
+            except Exception:
+                host = ""
+            if host:
+                ok, reason = validate_host(target, host, rules)
+                if not ok:
+                    logger.info("scope-rejected url %s: %s", canon[:200], reason)
+                    continue
+            u, created = URLAsset.objects.get_or_create(
+                target=target, canonical_url=canon,
+                defaults={"raw_url": raw, "host": host, "source": source})
+            if created:
+                new_urls += 1
+                emit_event("NEW_URL", target=target, asset_type="URL", asset_id=u.id,
+                           asset_value=canon[:500], source=source, evidence={"host": host})
+            else:
+                # T10: re-observation keeps the row fresh for reconciliation.
+                u.last_seen = timezone.now()
+                u.save(update_fields=["last_seen"])
+            is_api, api_type, auth_hints = classify_api(canon)
+            if is_api:
+                if not u.is_api:
+                    u.is_api = True
+                    u.save(update_fields=["is_api"])
+                ep, ep_created = APIEndpoint.objects.get_or_create(
+                    target=target, url=canon[:4000], method=item.get("method", "GET"),
+                    defaults={"host": host, "api_type": api_type, "auth_indicators": auth_hints, "source": source})
+                if ep_created:
+                    new_apis += 1
+                    _asset(target, "API_ENDPOINT", canon[:1000], {"type": api_type})
+                    emit_event("NEW_API_ENDPOINT", target=target, asset_type="API_ENDPOINT",
+                               asset_id=ep.id, asset_value=canon[:500], source=source,
+                               evidence={"api_type": api_type, "auth_indicators": auth_hints})
+                else:
+                    ep.last_seen = timezone.now()
+                    ep.save(update_fields=["last_seen"])
+        except Exception as e:
+            logger.warning("ingest_urls: skipping item: %s", e)
             continue
-        source = item.get("source", "")
-        host = canon.split("/")[2] if "://" in canon else ""
-        u, created = URLAsset.objects.get_or_create(
-            target=target, canonical_url=canon,
-            defaults={"raw_url": raw, "host": host, "source": source})
-        if created:
-            new_urls += 1
-            emit_event("NEW_URL", target=target, asset_type="URL", asset_id=u.id,
-                       asset_value=canon[:500], source=source, evidence={"host": host})
-        is_api, api_type, auth_hints = classify_api(canon)
-        if is_api:
-            u.is_api = True
-            u.save(update_fields=["is_api"])
-            ep, ep_created = APIEndpoint.objects.get_or_create(
-                target=target, url=canon[:4000], method=item.get("method", "GET"),
-                defaults={"host": host, "api_type": api_type, "auth_indicators": auth_hints, "source": source})
-            if ep_created:
-                new_apis += 1
-                _asset(target, "API_ENDPOINT", canon[:1000], {"type": api_type})
-                emit_event("NEW_API_ENDPOINT", target=target, asset_type="API_ENDPOINT",
-                           asset_id=ep.id, asset_value=canon[:500], source=source,
-                           evidence={"api_type": api_type, "auth_indicators": auth_hints})
     return new_urls, new_apis
 
 
 def ingest_js(target, js_url, content: bytes | str, source="httpx"):
     """Hash, store, detect JS_CHANGED, extract routes/secrets, emit events."""
     from apps.assets.models import JavaScriptAsset, JavaScriptVersion
-
     from services.correlation.jsintel import (
-        beautify, detect_js_libraries, extract_routes, extract_secret_candidates, sha256_bytes,
+        beautify,
+        detect_js_libraries,
+        extract_routes,
+        extract_secret_candidates,
+        sha256_bytes,
     )
 
     raw = content if isinstance(content, bytes) else content.encode("utf-8", errors="ignore")
@@ -416,8 +464,6 @@ def ingest_js(target, js_url, content: bytes | str, source="httpx"):
 
 def _store_js_findings(js, text, source):
     from apps.assets.models import JavaScriptFinding
-
-    from services.alerting.discord import mask_secret
     from services.correlation.jsintel import extract_secret_candidates
 
     for c in extract_secret_candidates(text):
@@ -439,8 +485,7 @@ def _store_js_findings(js, text, source):
 
 def ingest_technology(target, asset_value, product, version="", confidence=0.6, evidence="", source=""):
     from apps.assets.models import Technology
-
-    from services.cve_engine.matcher import normalize_product, normalize_vendor
+    from services.cve_engine.matcher import normalize_product
 
     product_n = normalize_product(product)
     tech, created = Technology.objects.get_or_create(
@@ -474,7 +519,6 @@ def ingest_technology(target, asset_value, product, version="", confidence=0.6, 
 
 def correlate_cves_for_tech(tech, kb=None):
     from apps.assets.models import CVE
-
     from services.cve_engine.matcher import correlate
 
     for cand in correlate(tech, kb=kb):
@@ -485,6 +529,8 @@ def correlate_cves_for_tech(tech, kb=None):
                       "affected_range": cand.get("affected_range", ""), "status": "candidate",
                       "evidence": cand.get("summary", ""), "sources": ["cvelistV5"]})
         if created:
+            _asset(tech.target, "CVE", f"{cand['cve_id']}@{tech.asset_value[:200]}",
+                   {"product": tech.product})
             emit_event("NEW_CVE_CANDIDATE", target=tech.target, asset_type="TECHNOLOGY",
                        asset_id=tech.id, asset_value=f"{cand['cve_id']} on {tech.asset_value[:150]}",
                        source="cve-engine", severity="HIGH",
@@ -511,6 +557,7 @@ def ingest_nuclei_finding(target, item):
         defaults={"title": name[:512], "severity": sev, "confidence": "medium",
                   "evidence": {"raw": str(item)[:3000]}, "source": "nuclei", "status": "NEW"})
     if created:
+        _asset(target, "FINDING", f"{name[:200]}@{str(asset)[:200]}", {"severity": sev})
         emit_event("NEW_SECURITY_FINDING", target=target, asset_type="PORT", asset_id=f.id,
                    asset_value=f"{name} on {str(asset)[:150]}", source="nuclei",
                    severity="HIGH" if sev in ("HIGH", "CRITICAL") else "MEDIUM",

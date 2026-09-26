@@ -95,6 +95,15 @@ class CrtshAdapter(BaseAdapter):
         except ImportError:
             return AdapterResult("crtsh", status="SKIPPED", error="requests library not installed")
 
+        # T4: resolve-then-check even for this fixed public host (DNS hijack /
+        # rebinding could otherwise redirect the query to internal space).
+        try:
+            from services.scope_engine.validator import host_resolves_to_blocked
+            blocked, why = host_resolves_to_blocked("crt.sh")
+            if blocked:
+                return AdapterResult("crtsh", status="FAILED", error=f"crt.sh {why}")
+        except Exception:
+            pass
         try:
             r = requests.get(f"https://crt.sh/?q=%25.{domain}&output=json", timeout=timeout)
             if r.status_code != 200:
@@ -153,6 +162,11 @@ class DnsxAdapter(BaseAdapter):
                 continue
         return out
 
+    def run(self, hosts, timeout=300, **kw):
+        """Task 13: pipe hosts on stdin (build_command holds flags only)."""
+        return self.run_stdin(hosts, timeout=timeout,
+                              extra_args=["-silent", "-json", "-a", "-aaaa", "-cname", "-resp"])
+
 
 class FfufAdapter(BaseAdapter):
     tool_name = "ffuf"
@@ -207,6 +221,13 @@ class HttpxAdapter(BaseAdapter):
             except json.JSONDecodeError:
                 continue
         return out
+
+    def run(self, hosts, timeout=600, **kw):
+        """Task 13: pipe hosts/URLs on stdin (build_command holds flags only)."""
+        return self.run_stdin(hosts, timeout=timeout,
+                              extra_args=["-silent", "-json", "-title", "-tech-detect",
+                                          "-status-code", "-content-type", "-content-length",
+                                          "-server", "-ip", "-tls-probe"])
 
 
 class GauAdapter(BaseAdapter):
@@ -396,7 +417,6 @@ ADAPTERS = {
 
 def tool_health():
     """Return list of {tool, version, path, status} without crashing on missing tools."""
-    import shutil
 
     rows = []
     for name, cls in ADAPTERS.items():
