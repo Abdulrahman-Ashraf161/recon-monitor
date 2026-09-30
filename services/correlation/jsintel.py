@@ -1,16 +1,22 @@
 """JS intelligence helpers: hashing, beautify (lightweight), secret/route extraction."""
+
 import hashlib
 import re
 
 SECRET_PATTERNS = [
     ("aws_key", re.compile(r"AKIA[0-9A-Z]{16}")),
-    ("generic_api_key", re.compile(r"(?i)(api[_-]?key|apikey)\s*[:=]\s*['\"]?([A-Za-z0-9_\-]{8,})['\"]?")),
+    (
+        "generic_api_key",
+        re.compile(r"(?i)(api[_-]?key|apikey)\s*[:=]\s*['\"]?([A-Za-z0-9_\-]{8,})['\"]?"),
+    ),
     ("bearer", re.compile(r"(?i)bearer\s+([A-Za-z0-9_\-\.~+/=]{10,})")),
     ("private_key", re.compile(r"-----BEGIN (?:RSA |EC |DSA )?PRIVATE KEY-----")),
     ("slack_token", re.compile(r"xox[baprs]-[A-Za-z0-9\-]{10,}")),
     ("github_token", re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}")),
 ]
-ROUTE_RE = re.compile(r"""['"`](/(?:api|v\d|graphql|rest|auth|admin|users|login)[A-Za-z0-9_\-/{}:.?=&%]*)['"`]""")
+ROUTE_RE = re.compile(
+    r"""['"`](/(?:api|v\d|graphql|rest|auth|admin|users|login)[A-Za-z0-9_\-/{}:.?=&%]*)['"`]"""
+)
 
 
 def sha256_bytes(data: bytes) -> str:
@@ -41,7 +47,9 @@ def extract_secret_candidates(js: str, limit=100):
     findings = []
     for name, rx in SECRET_PATTERNS:
         for m in rx.finditer(js or ""):
-            findings.append({"type": name, "match_preview": m.group(0)[:24] + "***", "full": m.group(0)[:500]})
+            findings.append(
+                {"type": name, "match_preview": m.group(0)[:24] + "***", "full": m.group(0)[:500]}
+            )
             if len(findings) >= limit:
                 return findings
     return findings
@@ -49,7 +57,17 @@ def extract_secret_candidates(js: str, limit=100):
 
 def detect_js_libraries(js: str):
     libs = []
-    signatures = ["jquery", "react", "angular", "vue", "lodash", "moment", "bootstrap", "ember", "backbone"]
+    signatures = [
+        "jquery",
+        "react",
+        "angular",
+        "vue",
+        "lodash",
+        "moment",
+        "bootstrap",
+        "ember",
+        "backbone",
+    ]
     low = (js or "").lower()
     for lib in signatures:
         if lib in low:

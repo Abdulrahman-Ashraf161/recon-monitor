@@ -14,10 +14,10 @@ Missing recon tools are skipped gracefully (MISSING in Settings → Tools & Syst
 
 > Backend note: the app boots `config.settings.development` by default
 > (`manage.py`, `config/asgi.py`). Production MUST set
-> `DJANGO_SETTINGS_MODULE=production` (compose below does this). The production
+> `DJANGO_SETTINGS_MODULE=config.settings.production` (compose below does this). The production
 > module **hard-fails** on insecure config instead of booting (Tasks 15/16).
 
-1. **Settings module:** `DJANGO_SETTINGS_MODULE=production`
+1. **Settings module:** `DJANGO_SETTINGS_MODULE=config.settings.production`
 2. **Secret:** `DJANGO_SECRET_KEY=<output of: python -c "import secrets; print(secrets.token_urlsafe(50))">`
    Required at build AND runtime (`migrate`, `collectstatic`, `daphne`, workers all
    need the SAME value, or sessions/CSRF break across processes).

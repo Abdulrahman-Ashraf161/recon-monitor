@@ -1,7 +1,10 @@
 """Hostname normalization + dedup (mandatory before storage)."""
+
 import re
 
-_HOST_RE = re.compile(r"^(?=.{1,253}$)(?!-)[a-z0-9-]{1,63}(?<!-)(\.(?!-)[a-z0-9-]{1,63}(?<!-))*$", re.IGNORECASE)
+_HOST_RE = re.compile(
+    r"^(?=.{1,253}$)(?!-)[a-z0-9-]{1,63}(?<!-)(\.(?!-)[a-z0-9-]{1,63}(?<!-))*$", re.IGNORECASE
+)
 
 
 def normalize_hostname(raw: str) -> str | None:

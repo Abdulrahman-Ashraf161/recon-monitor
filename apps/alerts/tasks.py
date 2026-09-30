@@ -1,6 +1,6 @@
 """Discord delivery tasks."""
+
 from celery import shared_task
-from django.utils import timezone
 
 
 @shared_task(name="apps.alerts.tasks.send_discord_alert")

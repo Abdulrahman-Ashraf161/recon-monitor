@@ -5,11 +5,24 @@ percent-encoding normalized, trailing-slash handling, query params sorted so
 semantically identical URLs map to one asset.
 Classification uses path + content-type + headers + body signals, not path alone.
 """
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse, unquote
 
-API_PATTERNS = ["/api/", "/api/v1/", "/api/v2/", "/graphql", "/rest/", "/swagger",
-                "/openapi.json", "/v1/", "/v2/", "/wp-json/", "/.well-known/openapi",
-                "/graphql/", "/gql"]
+from urllib.parse import parse_qsl, unquote, urlencode, urlparse, urlunparse
+
+API_PATTERNS = [
+    "/api/",
+    "/api/v1/",
+    "/api/v2/",
+    "/graphql",
+    "/rest/",
+    "/swagger",
+    "/openapi.json",
+    "/v1/",
+    "/v2/",
+    "/wp-json/",
+    "/.well-known/openapi",
+    "/graphql/",
+    "/gql",
+]
 
 
 def canonicalize_url(raw: str) -> str | None:
@@ -44,8 +57,9 @@ def canonicalize_url(raw: str) -> str | None:
     return urlunparse((scheme, netloc, path, "", query, ""))  # fragment always dropped
 
 
-def classify_api(url: str, content_type: str = "", headers: dict | None = None,
-                 body_hint: str = "") -> tuple[bool, str, list]:
+def classify_api(
+    url: str, content_type: str = "", headers: dict[str, str] | None = None, body_hint: str = ""
+) -> tuple[bool, str, list[str]]:
     """Evidence-based API classification (TASK-020)."""
     low = (url or "").lower()
     ct = (content_type or "").lower()
@@ -57,7 +71,7 @@ def classify_api(url: str, content_type: str = "", headers: dict | None = None,
             signals.append(f"path:{pat}")
     if "application/json" in ct and ("/api" in low or "graphql" in low or "rest" in low):
         signals.append("content-type:json+path")
-    if "graphql" in body or '"data"' in body and '"errors"' in body:
+    if "graphql" in body or ('"data"' in body and '"errors"' in body):
         signals.append("body:graphql-shape")
     if "swagger" in body or "openapi" in body:
         signals.append("body:openapi-schema")
@@ -73,5 +87,7 @@ def classify_api(url: str, content_type: str = "", headers: dict | None = None,
         api_type = "Versioned REST"
     else:
         api_type = "REST"
-    auth_hints = [h for h in ("auth", "login", "token", "admin", "internal", "oauth", "jwt") if h in low]
+    auth_hints = [
+        h for h in ("auth", "login", "token", "admin", "internal", "oauth", "jwt") if h in low
+    ]
     return True, api_type, auth_hints

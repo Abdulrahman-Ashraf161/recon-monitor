@@ -1,12 +1,21 @@
 """HTTP fingerprinting (TASK-014): deterministic hash of normalized relevant state."""
+
 import hashlib
 import json
+from typing import Any
 
-RELEVANT_HEADERS = ["server", "x-powered-by", "x-aspnet-version", "x-generator",
-                    "via", "x-cache", "strict-transport-security"]
+RELEVANT_HEADERS = [
+    "server",
+    "x-powered-by",
+    "x-aspnet-version",
+    "x-generator",
+    "via",
+    "x-cache",
+    "strict-transport-security",
+]
 
 
-def normalize_http_state(entry: dict) -> dict:
+def normalize_http_state(entry: dict[str, Any]) -> dict[str, Any]:
     headers = entry.get("headers") or {}
     if isinstance(headers, dict):
         rel = {k.lower(): str(v) for k, v in headers.items() if k.lower() in RELEVANT_HEADERS}
@@ -34,6 +43,6 @@ def normalize_http_state(entry: dict) -> dict:
     }
 
 
-def http_fingerprint(entry: dict) -> str:
+def http_fingerprint(entry: dict[str, Any]) -> str:
     norm = normalize_http_state(entry)
     return hashlib.sha256(json.dumps(norm, sort_keys=True, default=str).encode()).hexdigest()[:32]

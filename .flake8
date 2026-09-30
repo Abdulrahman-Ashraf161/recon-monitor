@@ -1,0 +1,25 @@
+[flake8]
+# Aligns flake8 with ruff.toml so the two linters do not report contradictory
+# results on the same file. There was previously no flake8 configuration, so it
+# ran on its 79-column default and reported E501 on nearly every line.
+max-line-length = 100
+extend-ignore =
+    # E501: line length is ruff's job; black/rustfmt wrap going forward.
+    E501,
+    # W503/E203: mutually exclusive with the formatter's line breaks.
+    W503,
+    E203
+exclude =
+    .git,
+    .venv,
+    venv,
+    */migrations/*,
+    staticfiles,
+    data
+per-file-ignores =
+    # Django settings use the `from .base import *` idiom by design.
+    config/settings/*.py: F401,F403,F405
+    # Tests use bare asserts and deliberately ambiguous single-letter names.
+    tests/*: E741
+    # `l` is a single path/label segment in the recon tool parsers.
+    services/tool_adapters/adapters.py: E741

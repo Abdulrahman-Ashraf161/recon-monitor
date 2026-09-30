@@ -1,7 +1,9 @@
 """Discord alert engine: dedup already done via fingerprint; here: severity policy,
 redaction, throttling/batching. HIGH/CRITICAL bypass batching."""
+
 import logging
 from datetime import timedelta
+from typing import Any
 
 from django.conf import settings
 from django.utils import timezone
@@ -19,7 +21,7 @@ def mask_secret(value: str) -> str:
     return f"{v[:4]}********{v[-2:]}"
 
 
-def redact_evidence(evidence: dict) -> dict:
+def redact_evidence(evidence: dict[str, Any]) -> dict[str, Any]:
     """Return a redacted copy safe for Discord."""
     if not isinstance(evidence, dict):
         return {}
@@ -38,18 +40,24 @@ def redact_evidence(evidence: dict) -> dict:
 def format_event(event) -> str:
     if event.event_type == "NEW_SUBDOMAIN":
         target = event.target.root_domain if event.target else "-"
-        return ("🆕 **NEW SUBDOMAIN**\n\n"
-                f"Target:\n{target}\n\n"
-                f"Subdomain:\n{event.asset_value[:200]}\n\n"
-                f"Source:\n{event.source or '-'}\n\n"
-                f"First Seen:\n{event.created_at.strftime('%Y-%m-%d %H:%M UTC')}\n\n"
-                "Status:\nProcessing downstream jobs...")
+        return (
+            "🆕 **NEW SUBDOMAIN**\n\n"
+            f"Target:\n{target}\n\n"
+            f"Subdomain:\n{event.asset_value[:200]}\n\n"
+            f"Source:\n{event.source or '-'}\n\n"
+            f"First Seen:\n{event.created_at.strftime('%Y-%m-%d %H:%M UTC')}\n\n"
+            "Status:\nProcessing downstream jobs..."
+        )
     icons = {"CRITICAL": "🚨", "HIGH": "🚨", "MEDIUM": "⚠️", "LOW": "ℹ️", "INFO": "ℹ️"}
     icon = icons.get(event.severity, "ℹ️")
     title = event.event_type.replace("_", " ")
     target = event.target.root_domain if event.target else "-"
-    lines = [f"{icon} **{title}**", f"Asset: `{event.asset_value[:200]}`", f"Target: {target}",
-             f"Severity: {event.severity} | Source: {event.source or '-'}"]
+    lines = [
+        f"{icon} **{title}**",
+        f"Asset: `{event.asset_value[:200]}`",
+        f"Target: {target}",
+        f"Severity: {event.severity} | Source: {event.source or '-'}",
+    ]
     ev = redact_evidence(event.evidence or {})
     for k, v in list(ev.items())[:6]:
         lines.append(f"{k}: {v}")
@@ -91,27 +99,40 @@ def dispatch_event(event):
 
     ok, reason = should_send(event)
     if not ok:
-        Alert.objects.create(event=event, channel="discord", status="SUPPRESSED", payload_preview=reason)
+        Alert.objects.create(
+            event=event, channel="discord", status="SUPPRESSED", payload_preview=reason
+        )
         return "SUPPRESSED"
     if SEV_ORDER.get(event.severity, 0) >= SEV_ORDER.get("MEDIUM", 2):
         text = format_event(event)
         sent, err = send_to_discord(text)
-        Alert.objects.create(event=event, channel="discord", status="SENT" if sent else "FAILED",
-                             payload_preview=text[:500], error="" if sent else err,
-                             sent_at=timezone.now() if sent else None)
+        Alert.objects.create(
+            event=event,
+            channel="discord",
+            status="SENT" if sent else "FAILED",
+            payload_preview=text[:500],
+            error="" if sent else err,
+            sent_at=timezone.now() if sent else None,
+        )
         return "SENT" if sent else "FAILED"
     # batch INFO/LOW
     window_end = timezone.now() + timedelta(seconds=BATCH_WINDOW_SECONDS)
     batch = DiscordBatch.objects.filter(status="PENDING").order_by("-created_at").first()
     if batch is None:
-        batch = DiscordBatch.objects.create(status="PENDING", event_ids=[], window_ends_at=window_end)
+        batch = DiscordBatch.objects.create(
+            status="PENDING", event_ids=[], window_ends_at=window_end
+        )
     ids = batch.event_ids or []
     if event.id not in ids:
         ids.append(event.id)
     batch.event_ids = ids
     batch.save(update_fields=["event_ids"])
-    Alert.objects.create(event=event, channel="discord", status="BATCHED",
-                         payload_preview=f"batched, window ends {batch.window_ends_at}")
+    Alert.objects.create(
+        event=event,
+        channel="discord",
+        status="BATCHED",
+        payload_preview=f"batched, window ends {batch.window_ends_at}",
+    )
     return "BATCHED"
 
 
@@ -123,7 +144,9 @@ def flush_batches() -> int:
     now = timezone.now()
     count = 0
     for batch in DiscordBatch.objects.filter(status="PENDING", window_ends_at__lte=now):
-        events = list(Event.objects.filter(id__in=batch.event_ids or []).order_by("created_at")[:25])
+        events = list(
+            Event.objects.filter(id__in=batch.event_ids or []).order_by("created_at")[:25]
+        )
         if not events:
             batch.status = "SENT"
             batch.sent_at = now
@@ -136,7 +159,22 @@ def flush_batches() -> int:
         batch.status = "SENT" if sent else "FAILED"
         batch.sent_at = now if sent else None
         batch.save(update_fields=["status", "sent_at"])
+        if not sent:
+            # P2-011/P2-013: DiscordBatch has no error column, so without this
+            # a FAILED batch is undiagnosable -- the operator sees a status but
+            # never the reason (rate limit, bad webhook, 5xx, no webhook set).
+            logger.warning(
+                "discord batch send failed",
+                extra={
+                    "operation": "flush_discord_batches",
+                    "status": "ERROR",
+                    "discord_batch_id": batch.pk,
+                    "event_count": len(events),
+                    "error": (err or "")[:200],
+                },
+            )
         Alert.objects.filter(event__in=[e.id for e in events], status="BATCHED").update(
-            status="SENT" if sent else "FAILED")
+            status="SENT" if sent else "FAILED"
+        )
         count += 1
     return count

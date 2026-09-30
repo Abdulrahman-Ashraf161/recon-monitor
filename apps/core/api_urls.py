@@ -1,9 +1,20 @@
 from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
-from .api import (APIViewSet, CVEViewSet, EventViewSet, FindingViewSet, HTTPViewSet,
-                  JobViewSet, JSViewSet, PortViewSet, SubdomainViewSet, TargetViewSet,
-                  TechViewSet, URLViewSet)
+from .api import (
+    APIViewSet,
+    CVEViewSet,
+    EventViewSet,
+    FindingViewSet,
+    HTTPViewSet,
+    JobViewSet,
+    JSViewSet,
+    PortViewSet,
+    SubdomainViewSet,
+    TargetViewSet,
+    TechViewSet,
+    URLViewSet,
+)
 
 router = DefaultRouter()
 router.register("targets", TargetViewSet, basename="api-targets")

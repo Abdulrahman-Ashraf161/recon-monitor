@@ -16,7 +16,7 @@ You only provide **your private things** (Discord webhook, subfinder API keys).
 Secret key, database, and task queue all have working defaults.
 
 ```bash
-git clone https://github.com/Abdo-Badawi/recon-monitor.git
+git clone https://github.com/Abdulrahman-Ashraf161/recon-monitor.git
 cd recon-monitor
 ./scripts/setup.sh    # asks only for your Discord webhook (optional, Enter to skip)
 ./scripts/start.sh    # open http://localhost:8000/dashboard/

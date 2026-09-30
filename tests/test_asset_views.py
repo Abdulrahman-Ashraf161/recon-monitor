@@ -5,7 +5,14 @@ filter param, and invalid params (?page=abc, ?target=not-an-int,
 ?page=99999). Written BEFORE the Task 20 DRY refactor; must pass identically
 before and after it. Invalid-?target= behavior encodes the Task 22 contract
 (empty page + notice, never 500).
+
+P2-009: the viewer is now granted membership on BOTH targets. Previously this
+user had no membership at all and the unpinned "All targets" pages returned
+every asset in the installation -- these expectations therefore encoded the
+cross-target leak. Cross-target isolation is asserted in
+tests/test_security_regression.py and tests/test_target_isolation.py.
 """
+
 from django.contrib.auth.models import User
 from django.test import Client, TestCase
 
@@ -21,7 +28,7 @@ from apps.assets.models import (
     Technology,
     URLAsset,
 )
-from apps.targets.models import Target
+from apps.targets.models import Target, TargetMembership
 
 
 def _vals(page):
@@ -35,38 +42,103 @@ class AssetViewsTests(TestCase):
         self.c.force_login(self.u)
         self.a = Target.objects.create(name="a", root_domain="a.invalid")
         self.b = Target.objects.create(name="b", root_domain="b.invalid")
+        # the viewer is a member of both targets: the list views must show both,
+        # and must never show anything this user is not a member of (P2-009)
+        for _t in (self.a, self.b):
+            TargetMembership.objects.create(
+                user=self.u, target=_t, role=TargetMembership.ROLE_VIEWER
+            )
         Subdomain.objects.create(target=self.a, hostname="web.a.invalid", sources=["s"])
         Subdomain.objects.create(target=self.b, hostname="web.b.invalid", sources=["s"])
         IPAddress.objects.create(target=self.a, ip="192.0.2.1")
         IPAddress.objects.create(target=self.b, ip="192.0.2.2")
         Port.objects.create(target=self.a, ip="192.0.2.1", port=80, protocol="tcp", state="open")
         Port.objects.create(target=self.b, ip="192.0.2.2", port=22, protocol="tcp", state="open")
-        HTTPService.objects.create(target=self.a, url="https://web.a.invalid/", host="web.a.invalid",
-                                   status_code=200, title="A")
-        HTTPService.objects.create(target=self.b, url="https://web.b.invalid/", host="web.b.invalid",
-                                   status_code=404, title="B")
-        URLAsset.objects.create(target=self.a, raw_url="https://web.a.invalid/x",
-                                canonical_url="https://web.a.invalid/x", host="web.a.invalid", source="gau")
-        URLAsset.objects.create(target=self.b, raw_url="https://web.b.invalid/x",
-                                canonical_url="https://web.b.invalid/x", host="web.b.invalid", source="katana")
-        APIEndpoint.objects.create(target=self.a, url="https://web.a.invalid/api/v1/u",
-                                   host="web.a.invalid", method="GET", api_type="REST")
-        JavaScriptAsset.objects.create(target=self.a, js_url="https://web.a.invalid/a.js",
-                                       host="web.a.invalid", sha256="a" * 64, size=10)
-        JavaScriptAsset.objects.create(target=self.b, js_url="https://web.b.invalid/b.js",
-                                       host="web.b.invalid", sha256="b" * 64, size=10)
-        Technology.objects.create(target=self.a, asset_value="https://web.a.invalid/",
-                                  product="nginx", version="1.0")
-        Technology.objects.create(target=self.b, asset_value="https://web.b.invalid/",
-                                  product="apache", version="2.0")
-        CVE.objects.create(target=self.a, cve_id="CVE-2024-0001", product="nginx",
-                           asset_value="https://web.a.invalid/", status="candidate")
-        CVE.objects.create(target=self.b, cve_id="CVE-2024-0002", product="apache",
-                           asset_value="https://web.b.invalid/", status="validated")
-        SecurityFinding.objects.create(target=self.a, asset_value="https://web.a.invalid/",
-                                       finding_type="t", title="FA", severity="HIGH", status="NEW")
-        SecurityFinding.objects.create(target=self.b, asset_value="https://web.b.invalid/",
-                                       finding_type="t", title="FB", severity="LOW", status="RESOLVED")
+        HTTPService.objects.create(
+            target=self.a,
+            url="https://web.a.invalid/",
+            host="web.a.invalid",
+            status_code=200,
+            title="A",
+        )
+        HTTPService.objects.create(
+            target=self.b,
+            url="https://web.b.invalid/",
+            host="web.b.invalid",
+            status_code=404,
+            title="B",
+        )
+        URLAsset.objects.create(
+            target=self.a,
+            raw_url="https://web.a.invalid/x",
+            canonical_url="https://web.a.invalid/x",
+            host="web.a.invalid",
+            source="gau",
+        )
+        URLAsset.objects.create(
+            target=self.b,
+            raw_url="https://web.b.invalid/x",
+            canonical_url="https://web.b.invalid/x",
+            host="web.b.invalid",
+            source="katana",
+        )
+        APIEndpoint.objects.create(
+            target=self.a,
+            url="https://web.a.invalid/api/v1/u",
+            host="web.a.invalid",
+            method="GET",
+            api_type="REST",
+        )
+        JavaScriptAsset.objects.create(
+            target=self.a,
+            js_url="https://web.a.invalid/a.js",
+            host="web.a.invalid",
+            sha256="a" * 64,
+            size=10,
+        )
+        JavaScriptAsset.objects.create(
+            target=self.b,
+            js_url="https://web.b.invalid/b.js",
+            host="web.b.invalid",
+            sha256="b" * 64,
+            size=10,
+        )
+        Technology.objects.create(
+            target=self.a, asset_value="https://web.a.invalid/", product="nginx", version="1.0"
+        )
+        Technology.objects.create(
+            target=self.b, asset_value="https://web.b.invalid/", product="apache", version="2.0"
+        )
+        CVE.objects.create(
+            target=self.a,
+            cve_id="CVE-2024-0001",
+            product="nginx",
+            asset_value="https://web.a.invalid/",
+            status="candidate",
+        )
+        CVE.objects.create(
+            target=self.b,
+            cve_id="CVE-2024-0002",
+            product="apache",
+            asset_value="https://web.b.invalid/",
+            status="validated",
+        )
+        SecurityFinding.objects.create(
+            target=self.a,
+            asset_value="https://web.a.invalid/",
+            finding_type="t",
+            title="FA",
+            severity="HIGH",
+            status="NEW",
+        )
+        SecurityFinding.objects.create(
+            target=self.b,
+            asset_value="https://web.b.invalid/",
+            finding_type="t",
+            title="FB",
+            severity="LOW",
+            status="RESOLVED",
+        )
 
     # -- subdomain_list --
     def test_subdomain_default_and_target(self):

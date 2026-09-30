@@ -1,4 +1,5 @@
 """Base Django settings for recon-monitor."""
+
 import os
 from pathlib import Path
 
@@ -36,7 +37,8 @@ if not SECRET_KEY or SECRET_KEY == "change-me-in-production-use-50-random-chars"
     SECRET_KEY_WAS_GENERATED = True
     _logging.getLogger(__name__).warning(
         "DJANGO_SECRET_KEY not set — using an ephemeral key. Sessions will reset on restart. "
-        "Set DJANGO_SECRET_KEY in .env for production.")
+        "Set DJANGO_SECRET_KEY in .env for production."
+    )
 DEBUG = env_bool("DJANGO_DEBUG", True)
 # Task 15: ALLOWED_HOSTS is derived AFTER DEBUG from an empty default, so a
 # production settings module that forgets DJANGO_DEBUG=False can never inherit
@@ -147,7 +149,10 @@ LOGIN_REDIRECT_URL = "/dashboard/"
 REDIS_URL = env("REDIS_URL", "redis://localhost:6379/0")
 if env_bool("USE_REDIS_CHANNELS", False):
     CHANNEL_LAYERS = {
-        "default": {"BACKEND": "channels_redis.core.RedisChannelLayer", "CONFIG": {"hosts": [REDIS_URL]}}
+        "default": {
+            "BACKEND": "channels_redis.core.RedisChannelLayer",
+            "CONFIG": {"hosts": [REDIS_URL]},
+        }
     }
 else:
     CHANNEL_LAYERS = {"default": {"BACKEND": "channels.layers.InMemoryChannelLayer"}}
@@ -176,9 +181,18 @@ CELERY_TASK_ROUTES = {
 CELERY_BEAT_SCHEDULE = {
     "reconcile-every-30m": {"task": "apps.monitoring.tasks.reconcile_all", "schedule": 1800.0},
     "cve-sync-every-6h": {"task": "apps.monitoring.tasks.sync_cve_database", "schedule": 21600.0},
-    "check-auth-expiry-every-15m": {"task": "apps.monitoring.tasks.check_authorization_expiry", "schedule": 900.0},
-    "flush-discord-batches-every-60s": {"task": "apps.alerts.tasks.flush_discord_batches", "schedule": 60.0},
-    "detect-stalled-jobs-every-10m": {"task": "apps.monitoring.tasks.detect_stalled_jobs", "schedule": 600.0},
+    "check-auth-expiry-every-15m": {
+        "task": "apps.monitoring.tasks.check_authorization_expiry",
+        "schedule": 900.0,
+    },
+    "flush-discord-batches-every-60s": {
+        "task": "apps.alerts.tasks.flush_discord_batches",
+        "schedule": 60.0,
+    },
+    "detect-stalled-jobs-every-10m": {
+        "task": "apps.monitoring.tasks.detect_stalled_jobs",
+        "schedule": 600.0,
+    },
 }
 
 # --- DRF ---
@@ -203,18 +217,61 @@ DISCORD_MIN_SEVERITY = env("DISCORD_MIN_SEVERITY", "LOW")
 DATA_DIR = BASE_DIR / "data"
 RAW_DIR = DATA_DIR / "raw"
 ARTIFACTS_DIR = DATA_DIR / "artifacts"
+# P1-015: exports are per-target disclosures; the root is git-ignored and each
+# target gets an id-keyed subdirectory.
+EXPORTS_DIR = DATA_DIR / "exports"
 
 # --- Recon tool binaries (Task 25) ---
 # Absolute dir pinned ahead of PATH (e.g. /opt/recon-tools/bin in production).
 # Empty (default) keeps the dev flow: ~/go/bin + ambient PATH via scripts/setup_tools.sh.
 TOOL_BIN_DIR = env("TOOL_BIN_DIR", "")
 
-# --- Target isolation posture (Task 7) ---
-# True: single-tenant install — every authenticated viewer may browse every
-# target; global (unscoped) list views stay cross-target BY DESIGN, while
-# detail views still enforce an explicit/session target context on mismatch.
-# False (future multi-tenant): target context becomes mandatory everywhere.
-SINGLE_TENANT_ALL_TARGETS = env_bool("SINGLE_TENANT_ALL_TARGETS", True)
+# --- Target isolation posture (P0-002/P0-003) ---
+# REMEDIATION: the previous default (True) meant "every authenticated viewer may
+# browse every target" — a single-tenant shortcut that made cross-target
+# isolation untestable and unsafe the moment a second analyst was added.
+# Authorization is now ALWAYS enforced server-side through
+# apps.core.authorization + apps.targets.models.TargetMembership.
+# SINGLE_TENANT_ALL_TARGETS is retained ONLY as an explicit operator opt-out for
+# genuine single-analyst installs and now DEFAULTS TO FALSE.
+SINGLE_TENANT_ALL_TARGETS = env_bool("SINGLE_TENANT_ALL_TARGETS", False)
+# When True, an ADMIN profile (or superuser) implicitly holds OWNER on every
+# target without per-target membership rows. Off by default: the override must
+# be deliberate.
+GLOBAL_TARGET_ADMIN_OVERRIDE = env_bool("GLOBAL_TARGET_ADMIN_OVERRIDE", False)
+
+# --- P2-006: cooperative kill switch ---
+# Seconds a long-running tool execution may run without refreshing its job
+# heartbeat before the stall detector considers it dead.
+JOB_STALL_SECONDS = int(env("JOB_STALL_SECONDS", "1800") or 1800)
+# P1-006: a job whose heartbeat expired is moved out of RUNNING (and its run
+# closed) so a wedged worker cannot leave an execution root alive forever.
+# Set to False to flag/report only.
+JOB_STALL_MARK_FAILED = env_bool("JOB_STALL_MARK_FAILED", True)
+# How often long loops re-check target.is_scannable / heartbeat.
+CANCELLATION_POLL_SECONDS = float(env("CANCELLATION_POLL_SECONDS", "5") or 5)
+
+# --- P1-007: CVE correlation ---
+# Rows fetched per batch while correlating technologies. Coverage is total
+# (the sweep walks every record in keyset batches); the batch size only bounds
+# memory/latency per step, and is deliberately not a cap on total coverage.
+CVE_CORRELATION_BATCH_SIZE = int(env("CVE_CORRELATION_BATCH_SIZE", "500") or 500)
+
+# --- P1-009: JS recheck ---
+# Assets rechecked per batch. Coverage is total (the sweep walks every asset in
+# keyset batches); this only bounds how much is held in memory per step.
+JS_RECHECK_BATCH_SIZE = int(env("JS_RECHECK_BATCH_SIZE", "100") or 100)
+
+# --- P1-010: reconciliation ---
+# Rows reconciled per batch. The sweep is complete (every stale row in keyset
+# batches); this only bounds per-batch memory.
+RECONCILE_BATCH_SIZE = int(env("RECONCILE_BATCH_SIZE", "500") or 500)
+
+# --- P3-002: audit of arbitrary limits ---
+# Hosts loaded per batch by the DNS stage. The stage resolves *every* active
+# host (the old [:2000] cap silently left the rest unresolved); this only
+# bounds how many are held in memory per batch.
+DNS_HOST_BATCH_SIZE = int(env("DNS_HOST_BATCH_SIZE", "1000") or 1000)
 
 SECURE_BROWSER_XSS_FILTER = True
 SESSION_COOKIE_HTTPONLY = True
@@ -225,12 +282,34 @@ CSRF_COOKIE_HTTPONLY = False
 LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,
-    "filters": {"context_defaults": {"()": "django.utils.log.CallbackFilter", "callback": lambda r: (all(hasattr(r, k) for k in ("target_id", "scan_run_id", "task_id", "operation", "status")) or [setattr(r, k, "-") for k in ("target_id", "scan_run_id", "task_id", "operation", "status") if not hasattr(r, k)], True)[-1]}},
+    "filters": {
+        "context_defaults": {
+            "()": "django.utils.log.CallbackFilter",
+            "callback": lambda r: (
+                all(
+                    hasattr(r, k)
+                    for k in ("target_id", "scan_run_id", "task_id", "operation", "status")
+                )
+                or [
+                    setattr(r, k, "-")
+                    for k in ("target_id", "scan_run_id", "task_id", "operation", "status")
+                    if not hasattr(r, k)
+                ],
+                True,
+            )[-1],
+        }
+    },
     "formatters": {
         "structured": {
             "format": "%(asctime)s %(levelname)s %(name)s target=%(target_id)s scan=%(scan_run_id)s task=%(task_id)s op=%(operation)s status=%(status)s %(message)s",
         },
     },
-    "handlers": {"console": {"class": "logging.StreamHandler", "formatter": "structured", "filters": ["context_defaults"]}},
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": "structured",
+            "filters": ["context_defaults"],
+        }
+    },
     "root": {"handlers": ["console"], "level": "INFO"},
 }

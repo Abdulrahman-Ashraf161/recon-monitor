@@ -1,8 +1,12 @@
 """Role helpers + audit helper."""
+
+import logging
 from functools import wraps
 
 from django.contrib.auth.decorators import login_required
 from django.core.exceptions import PermissionDenied
+
+logger = logging.getLogger(__name__)
 
 
 def role_of(user):
@@ -10,10 +14,11 @@ def role_of(user):
         return "ANON"
     if user.is_superuser:
         return "ADMIN"
-    try:
-        return user.profile.role
-    except Exception:
+    profile = getattr(user, "profile", None)
+    if profile is None:
+        # No profile row yet: treat as least privilege, never as elevated.
         return "VIEWER"
+    return profile.role
 
 
 def require_roles(*roles):
@@ -39,6 +44,13 @@ require_viewer = require_roles("ADMIN", "OPERATOR", "VIEWER")
 
 
 def audit(request, action, obj=None, old="", new=""):
+    """Persist an audit record.
+
+    Audit rows are security evidence: a write failure is logged loudly and
+    re-raised to the caller, never swallowed. The previous bare
+    ``except Exception: pass`` silently discarded every audit failure
+    (P1-003 / P2 observability).
+    """
     from apps.audit.models import AuditLog
 
     try:
@@ -47,8 +59,10 @@ def audit(request, action, obj=None, old="", new=""):
             action=action,
             object_type=type(obj).__name__ if obj else "",
             object_id=str(getattr(obj, "pk", "") or ""),
-            old_value=str(old)[:2000], new_value=str(new)[:2000],
+            old_value=str(old)[:2000],
+            new_value=str(new)[:2000],
             ip=request.META.get("REMOTE_ADDR"),
         )
     except Exception:
-        pass
+        logger.exception("audit log write failed", extra={"operation": action, "status": "ERROR"})
+        raise

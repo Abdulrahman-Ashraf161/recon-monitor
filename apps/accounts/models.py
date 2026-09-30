@@ -14,6 +14,10 @@ class Profile(models.Model):
     role = models.CharField(max_length=16, choices=ROLE_CHOICES, default=ROLE_VIEWER)
     # Task 27: setup.sh-created admins must change their password on first login.
     must_change_password = models.BooleanField(default=False)
+    # P0-002: the global override that lets an ADMIN see every target WITHOUT a
+    # membership row on each one. Off by default so a profile role alone never
+    # silently widens access; superusers always have the override.
+    is_global_target_admin = models.BooleanField(default=False)
 
     def __str__(self):
         return f"{self.user.username} ({self.role})"
@@ -31,4 +35,8 @@ class Profile(models.Model):
 def create_profile(sender, instance, created, **kwargs):
     if created:
         role = Profile.ROLE_ADMIN if instance.is_superuser else Profile.ROLE_VIEWER
-        Profile.objects.create(user=instance, role=role)
+        # A superuser gets the global override implicitly (checked before the
+        # profile flag), but we record it for clarity/auditability.
+        Profile.objects.create(
+            user=instance, role=role, is_global_target_admin=bool(instance.is_superuser)
+        )

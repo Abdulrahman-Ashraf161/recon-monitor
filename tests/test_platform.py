@@ -1,4 +1,5 @@
 """Unit tests: scope, normalization, dedup, CVE matching, discord redaction, events."""
+
 from django.test import TestCase
 
 from apps.targets.models import Target
@@ -56,8 +57,12 @@ class BaselineSuppressionTests(TestCase):
         from apps.events.models import Alert, Event
         from services.event_engine.engine import emit_event
 
-        t = Target.objects.create(name="t", root_domain="example.com", baseline_status="INITIAL_BASELINE")
-        e, created = emit_event("NEW_SUBDOMAIN", target=t, asset_value="a.example.com", source="test")
+        t = Target.objects.create(
+            name="t", root_domain="example.com", baseline_status="INITIAL_BASELINE"
+        )
+        e, created = emit_event(
+            "NEW_SUBDOMAIN", target=t, asset_value="a.example.com", source="test"
+        )
         self.assertTrue(created)
         self.assertTrue(Event.objects.filter(pk=e.pk).exists())
         self.assertTrue(Alert.objects.filter(event=e, status="SUPPRESSED").exists())
@@ -124,11 +129,14 @@ class IncrementalChainTests(TestCase):
         from apps.jobs.models import ScanJob
         from apps.jobs.tasks import process_new_subdomain
 
-        t = Target.objects.create(name="t", root_domain="example.invalid",
-                                    authorization_status=Target.AUTH_AUTHORIZED)
+        t = Target.objects.create(
+            name="t", root_domain="example.invalid", authorization_status=Target.AUTH_AUTHORIZED
+        )
         out = process_new_subdomain(t.id, "api.example.invalid", trigger="event:1")
         self.assertEqual(out["status"], "COMPLETED")
-        job = ScanJob.objects.filter(target=t, job_type="dns", asset_value="api.example.invalid").first()
+        job = ScanJob.objects.filter(
+            target=t, job_type="dns", asset_value="api.example.invalid"
+        ).first()
         self.assertIsNotNone(job)
         self.assertEqual(job.trigger, "event:1")
 
@@ -137,11 +145,19 @@ class IncrementalChainTests(TestCase):
         from apps.jobs.tasks import handle_event_dependents
         from services.event_engine.engine import emit_event
 
-        t = Target.objects.create(name="t", root_domain="example.invalid",
-                                    authorization_status=Target.AUTH_AUTHORIZED)
-        ScanJob.objects.create(target=t, job_type="dns", status="RUNNING",
-                               asset_type="SUBDOMAIN", asset_value="api.example.invalid")
-        e, _ = emit_event("NEW_SUBDOMAIN", target=t, asset_value="other.example.invalid", source="test")
+        t = Target.objects.create(
+            name="t", root_domain="example.invalid", authorization_status=Target.AUTH_AUTHORIZED
+        )
+        ScanJob.objects.create(
+            target=t,
+            job_type="dns",
+            status="RUNNING",
+            asset_type="SUBDOMAIN",
+            asset_value="api.example.invalid",
+        )
+        e, _ = emit_event(
+            "NEW_SUBDOMAIN", target=t, asset_value="other.example.invalid", source="test"
+        )
         # fan-out for NEW_SUBDOMAIN dispatches process_new_subdomain; asset job creation
         # must not duplicate a RUNNING job for the same asset
         out = handle_event_dependents(e.id)
@@ -169,8 +185,9 @@ class JSAnalysisTests(TestCase):
         from apps.jobs.models import JSAnalysisJob
         from services.correlation.ingest import ingest_js
 
-        t = Target.objects.create(name="t", root_domain="example.invalid",
-                                    authorization_status=Target.AUTH_AUTHORIZED)
+        t = Target.objects.create(
+            name="t", root_domain="example.invalid", authorization_status=Target.AUTH_AUTHORIZED
+        )
         js, outcome = ingest_js(t, "https://example.invalid/app.js", b"var a=1;", source="test")
         self.assertEqual(outcome, "NEW_JS")
         # fan-out queues analysis (eager: runs inline, download fails for .invalid -> FAILED w/ logs)
@@ -201,10 +218,14 @@ class DiscordFailureTests(TestCase):
         from services.event_engine.engine import emit_event
 
         t = Target.objects.create(name="t", root_domain="example.invalid")
-        with override_settings(DISCORD_ENABLED=True, DISCORD_WEBHOOK_URL="http://127.0.0.1:9/invalid"):
+        with override_settings(
+            DISCORD_ENABLED=True, DISCORD_WEBHOOK_URL="http://127.0.0.1:9/invalid"
+        ):
             from apps.alerts.tasks import send_discord_alert
 
-            e, _ = emit_event("NEW_IP", target=t, asset_value="10.0.0.1", source="test", severity="HIGH")
+            e, _ = emit_event(
+                "NEW_IP", target=t, asset_value="10.0.0.1", source="test", severity="HIGH"
+            )
             out = send_discord_alert(e.id)
             self.assertEqual(out["status"], "FAILED")
             self.assertTrue(Alert.objects.filter(event=e, status="FAILED").exists())
@@ -238,15 +259,20 @@ class IngestRobustnessTests(TestCase):
         from apps.assets.models import URLAsset
         from apps.targets.models import Target
         from services.correlation.ingest import ingest_urls
+
         t = Target.objects.create(name="robust", root_domain="example.invalid")
-        new_urls, _ = ingest_urls(t, [
-            {"url": "https://", "source": "gau"},       # malformed: no host
-            {"url": "https://example.invalid/ok", "source": "gau"},
-            "not-a-dict",                                # wrong shape entirely
-        ])
+        new_urls, _ = ingest_urls(
+            t,
+            [
+                {"url": "https://", "source": "gau"},  # malformed: no host
+                {"url": "https://example.invalid/ok", "source": "gau"},
+                "not-a-dict",  # wrong shape entirely
+            ],
+        )
         self.assertEqual(new_urls, 1)
-        self.assertTrue(URLAsset.objects.filter(
-            target=t, canonical_url="https://example.invalid/ok").exists())
+        self.assertTrue(
+            URLAsset.objects.filter(target=t, canonical_url="https://example.invalid/ok").exists()
+        )
 
 
 class RedactionTests(TestCase):
@@ -254,24 +280,33 @@ class RedactionTests(TestCase):
 
     def test_separate_arg_secret_redacted(self):
         from services.tool_adapters.base import redact_command
-        self.assertEqual(redact_command(["subfinder", "-shodan-key", "sk-live-123"]),
-                         "subfinder -shodan-key ***REDACTED***")
+
+        self.assertEqual(
+            redact_command(["subfinder", "-shodan-key", "sk-live-123"]),
+            "subfinder -shodan-key ***REDACTED***",
+        )
 
     def test_header_secret_redacted(self):
         from services.tool_adapters.base import redact_command
-        self.assertEqual(redact_command(["httpx", "-H", "Authorization: Bearer abc"]),
-                         "httpx -H ***REDACTED***")
+
+        self.assertEqual(
+            redact_command(["httpx", "-H", "Authorization: Bearer abc"]), "httpx -H ***REDACTED***"
+        )
 
     def test_url_userinfo_redacted(self):
         from services.tool_adapters.base import redact_command
+
         self.assertEqual(
             redact_command(["nuclei", "-u", "https://user:s3cr3t@example.com/x"]),
-            "nuclei -u https://***REDACTED***@example.com/x")
+            "nuclei -u https://***REDACTED***@example.com/x",
+        )
 
     def test_benign_command_preserved(self):
         from services.tool_adapters.base import redact_command
-        self.assertEqual(redact_command(["nuclei", "-u", "https://example.com"]),
-                         "nuclei -u https://example.com")
+
+        self.assertEqual(
+            redact_command(["nuclei", "-u", "https://example.com"]), "nuclei -u https://example.com"
+        )
 
 
 class AuthorizationDefaultTests(TestCase):
@@ -279,32 +314,50 @@ class AuthorizationDefaultTests(TestCase):
 
     def test_new_target_defaults_to_not_scannable(self):
         from apps.targets.models import Target
+
         t = Target.objects.create(name="pending", root_domain="pending.invalid")
         self.assertNotEqual(t.authorization_status, Target.AUTH_AUTHORIZED)
         self.assertFalse(t.is_scannable)
 
     def test_existing_authorized_unaffected(self):
         from apps.targets.models import Target
-        t = Target.objects.create(name="auth", root_domain="auth.invalid",
-                                  authorization_status=Target.AUTH_AUTHORIZED)
+
+        t = Target.objects.create(
+            name="auth", root_domain="auth.invalid", authorization_status=Target.AUTH_AUTHORIZED
+        )
         self.assertTrue(t.is_scannable)
 
     def test_form_requires_confirmation_for_authorized(self):
         from apps.targets.forms import TargetForm
         from apps.targets.models import Target
-        form = TargetForm({"name": "f", "root_domain": "f.invalid",
-                           "status": Target.STATUS_ACTIVE,
-                           "authorization_status": Target.AUTH_AUTHORIZED,
-                           "auth_warning_days": 7, "scan_profile": "balanced",
-                           "verify_tls": True, "scan_config": {}})
+
+        form = TargetForm(
+            {
+                "name": "f",
+                "root_domain": "f.invalid",
+                "status": Target.STATUS_ACTIVE,
+                "authorization_status": Target.AUTH_AUTHORIZED,
+                "auth_warning_days": 7,
+                "scan_profile": "balanced",
+                "verify_tls": True,
+                "scan_config": {},
+            }
+        )
         self.assertFalse(form.is_valid())
-        form = TargetForm({"name": "f", "root_domain": "f.invalid",
-                           "status": Target.STATUS_ACTIVE,
-                           "authorization_status": Target.AUTH_AUTHORIZED,
-                           "authorization_expires_at": "2030-01-01 00:00",
-                           "auth_warning_days": 7, "scan_profile": "balanced",
-                           "verify_tls": True, "scan_config": {},
-                           "confirm_authorized": True})
+        form = TargetForm(
+            {
+                "name": "f",
+                "root_domain": "f.invalid",
+                "status": Target.STATUS_ACTIVE,
+                "authorization_status": Target.AUTH_AUTHORIZED,
+                "authorization_expires_at": "2030-01-01 00:00",
+                "auth_warning_days": 7,
+                "scan_profile": "balanced",
+                "verify_tls": True,
+                "scan_config": {},
+                "confirm_authorized": True,
+            }
+        )
         self.assertTrue(form.is_valid(), form.errors)
 
 
@@ -316,6 +369,7 @@ class TlsContextTests(TestCase):
 
         from apps.jobs.tasks import _ssl_context_for
         from apps.targets.models import Target
+
         t = Target(name="t", root_domain="x.invalid", verify_tls=True)
         ctx = _ssl_context_for(t)
         self.assertTrue(ctx.check_hostname)
@@ -327,13 +381,17 @@ class TlsContextTests(TestCase):
         from apps.jobs.models import JobLog, ScanJob
         from apps.jobs.tasks import _ssl_context_for
         from apps.targets.models import Target
+
         t = Target.objects.create(name="t", root_domain="x.invalid", verify_tls=False)
         job = ScanJob.objects.create(target=t, job_type="http", status="RUNNING")
         ctx = _ssl_context_for(t, job, stage="http")
         self.assertFalse(ctx.check_hostname)
         self.assertEqual(ctx.verify_mode, ssl.CERT_NONE)
-        self.assertTrue(JobLog.objects.filter(
-            job=job, level="WARNING", message__icontains="verify_tls=false").exists())
+        self.assertTrue(
+            JobLog.objects.filter(
+                job=job, level="WARNING", message__icontains="verify_tls=false"
+            ).exists()
+        )
 
 
 class ScopeRulesTests(TestCase):
@@ -341,11 +399,13 @@ class ScopeRulesTests(TestCase):
 
     def _rule(self, target, rule_type, value):
         from apps.scope.models import ScopeRule
+
         return ScopeRule.objects.create(target=target, rule_type=rule_type, value=value)
 
     def test_allow_domain_and_wildcard(self):
         from apps.targets.models import Target
         from services.scope_engine.validator import validate_host
+
         t = Target.objects.create(name="r", root_domain="example.invalid")
         self._rule(t, "allow_domain", "*.example.invalid")
         rules = list(t.scope_rules.all())
@@ -357,6 +417,7 @@ class ScopeRulesTests(TestCase):
     def test_exclude_host_wins(self):
         from apps.targets.models import Target
         from services.scope_engine.validator import validate_host
+
         t = Target.objects.create(name="r2", root_domain="example.invalid")
         self._rule(t, "exclude_host", "bad.example.invalid")
         rules = list(t.scope_rules.all())
@@ -368,6 +429,7 @@ class ScopeRulesTests(TestCase):
     def test_ip_allow_exclude_lists(self):
         from apps.targets.models import Target
         from services.scope_engine.validator import validate_ip
+
         t = Target.objects.create(name="r3", root_domain="example.invalid")
         self._rule(t, "exclude_ip", "192.0.2.0/24")
         self._rule(t, "allow_ip", "198.51.100.0/24")
@@ -382,8 +444,10 @@ class ScopeRulesTests(TestCase):
     def test_scope_allows_scan_states(self):
         from apps.targets.models import Target
         from services.scope_engine.validator import scope_allows_scan
-        t = Target.objects.create(name="r4", root_domain="example.invalid",
-                                  authorization_status=Target.AUTH_AUTHORIZED)
+
+        t = Target.objects.create(
+            name="r4", root_domain="example.invalid", authorization_status=Target.AUTH_AUTHORIZED
+        )
         ok, _ = scope_allows_scan(t, [])
         self.assertTrue(ok)
         t.status = Target.STATUS_PAUSED
@@ -392,8 +456,10 @@ class ScopeRulesTests(TestCase):
 
     def test_resolve_check_unresolvable_and_obfuscation(self):
         from services.scope_engine.validator import (
-            host_resolves_to_blocked, is_private_or_reserved,
+            host_resolves_to_blocked,
+            is_private_or_reserved,
         )
+
         blocked, _ = host_resolves_to_blocked("no-such-host.invalid")
         self.assertFalse(blocked)
         # decimal-encoded loopback + octal garbage (fail-closed)
@@ -403,13 +469,21 @@ class ScopeRulesTests(TestCase):
     def test_resolve_check_blocked_and_public(self):
         import socket
         from unittest.mock import patch
+
         from services.scope_engine.validator import host_resolves_to_blocked
-        with patch.object(socket, "getaddrinfo",
-                          return_value=[(socket.AF_INET, None, None, None, ("10.9.9.9", 0))]):
+
+        with patch.object(
+            socket,
+            "getaddrinfo",
+            return_value=[(socket.AF_INET, None, None, None, ("10.9.9.9", 0))],
+        ):
             blocked, why = host_resolves_to_blocked("x.invalid")
             self.assertTrue(blocked)
             self.assertIn("10.9.9.9", why)
-        with patch.object(socket, "getaddrinfo",
-                          return_value=[(socket.AF_INET, None, None, None, ("93.184.216.34", 0))]):
+        with patch.object(
+            socket,
+            "getaddrinfo",
+            return_value=[(socket.AF_INET, None, None, None, ("93.184.216.34", 0))],
+        ):
             blocked, _ = host_resolves_to_blocked("x.invalid")
             self.assertFalse(blocked)

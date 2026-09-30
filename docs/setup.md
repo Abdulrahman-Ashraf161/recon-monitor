@@ -10,7 +10,7 @@
 ## 2. Quickstart — one script, only YOUR private things needed
 
 ```bash
-git clone https://github.com/Abdo-Badawi/recon-monitor.git
+git clone https://github.com/Abdulrahman-Ashraf161/recon-monitor.git
 cd recon-monitor
 ./scripts/setup.sh     # asks only for your Discord webhook (optional)
 ./scripts/start.sh     # open http://localhost:8000/dashboard/

@@ -22,7 +22,7 @@ services:
       context: ..
       dockerfile: docker/Dockerfile
     environment:
-      DJANGO_SETTINGS_MODULE: production
+      DJANGO_SETTINGS_MODULE: config.settings.production
       DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?set DJANGO_SECRET_KEY in docker/.env}
       ALLOWED_HOSTS: ${ALLOWED_HOSTS:?set ALLOWED_HOSTS in docker/.env}
       DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in docker/.env}
@@ -41,7 +41,7 @@ services:
       dockerfile: docker/Dockerfile
     command: celery -A config worker -l info
     environment:
-      DJANGO_SETTINGS_MODULE: production
+      DJANGO_SETTINGS_MODULE: config.settings.production
       DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?set DJANGO_SECRET_KEY in docker/.env}
       ALLOWED_HOSTS: ${ALLOWED_HOSTS:?set ALLOWED_HOSTS in docker/.env}
       DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in docker/.env}
@@ -56,7 +56,7 @@ services:
       dockerfile: docker/Dockerfile
     command: celery -A config beat -l info
     environment:
-      DJANGO_SETTINGS_MODULE: production
+      DJANGO_SETTINGS_MODULE: config.settings.production
       DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?set DJANGO_SECRET_KEY in docker/.env}
       ALLOWED_HOSTS: ${ALLOWED_HOSTS:?set ALLOWED_HOSTS in docker/.env}
       DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in docker/.env}

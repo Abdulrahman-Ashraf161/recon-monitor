@@ -1,4 +1,5 @@
 """Celery app. Imported by config/__init__ via settings."""
+
 import os
 
 from celery import Celery

@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block title %}Scan run #{{ run.id }}{% endblock %}
+{% block content %}
+<h1>Scan run #{{ run.id }}</h1>
+<p>
+  <strong>Target:</strong> {{ run.target.root_domain }} &middot;
+  <strong>Type:</strong> {{ run.scan_type }} &middot;
+  <strong>Trigger:</strong> {{ run.trigger }} &middot;
+  <strong>Status:</strong> <span class="badge">{{ run.status }}</span>
+</p>
+<p>
+  <strong>Started:</strong> {{ run.started_at|default:"-" }} &middot;
+  <strong>Finished:</strong> {{ run.finished_at|default:"-" }} &middot;
+  <strong>Requested by:</strong> {{ run.requested_by|default:"-" }}
+</p>
+{% if run.cancel_requested_at %}
+  <p class="warn">Cancel requested: {{ run.cancel_requested_at }} ({{ run.cancel_reason }})</p>
+{% endif %}
+{% if run.error_summary %}<p class="warn">{{ run.error_summary }}</p>{% endif %}
+
+<h2>Coverage summary</h2>
+<pre>{{ run.coverage_summary|default:"{}" }}</pre>
+
+<h2>Jobs ({{ jobs|length }})</h2>
+<table>
+  <tr><th>Job</th><th>Type</th><th>Status</th><th>Started</th><th>Finished</th></tr>
+  {% for job in jobs %}
+  <tr>
+    <td><a href="{% url 'job-detail' job.id %}">#{{ job.id }}</a></td>
+    <td>{{ job.job_type }}</td>
+    <td>{{ job.status }}</td>
+    <td>{{ job.started_at|default:"-" }}</td>
+    <td>{{ job.finished_at|default:"-" }}</td>
+  </tr>
+  {% empty %}
+  <tr><td colspan="5">No jobs recorded on this run.</td></tr>
+  {% endfor %}
+</table>
+
+<h2>Tool executions ({{ tool_executions|length }})</h2>
+<table>
+  <tr><th>Tool</th><th>Status</th><th>Exit</th><th>Duration</th><th>Fallback</th><th>Coverage</th></tr>
+  {% for te in tool_executions %}
+  <tr>
+    <td>{{ te.tool_name }}</td>
+    <td>{{ te.status }}</td>
+    <td>{{ te.exit_code|default_if_none:"-" }}</td>
+    <td>{{ te.duration|default_if_none:"-" }}s</td>
+    <td>{{ te.fallback_used|yesno:"yes,no" }}</td>
+    <td><code>{{ te.coverage }}</code></td>
+  </tr>
+  {% empty %}
+  <tr><td colspan="6">No tool executions recorded on this run.</td></tr>
+  {% endfor %}
+</table>
+{% endblock %}

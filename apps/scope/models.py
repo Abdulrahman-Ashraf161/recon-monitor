@@ -1,4 +1,5 @@
 """Scope rules: allowed/excluded hosts, IPs, ports, rate limits."""
+
 from django.conf import settings
 from django.db import models
 
@@ -23,7 +24,11 @@ class ScopeRule(models.Model):
         (RULE_CONCURRENCY, "Concurrency"),
     ]
     target = models.ForeignKey(
-        "targets.Target", null=True, blank=True, on_delete=models.CASCADE, related_name="scope_rules"
+        "targets.Target",
+        null=True,
+        blank=True,
+        on_delete=models.CASCADE,
+        related_name="scope_rules",
     )
     objects = TargetScopedManager()
     all_objects = models.Manager()

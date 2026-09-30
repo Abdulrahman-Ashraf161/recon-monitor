@@ -1,4 +1,5 @@
 """Concrete adapters for every recon tool. Missing binaries -> SKIPPED, never crash."""
+
 import json
 import re
 
@@ -37,7 +38,11 @@ class AmassAdapter(BaseAdapter):
         return [self.binary, "enum", "-passive", "-d", domain]
 
     def parse(self, stdout, stderr=""):
-        return [{"hostname": l.strip(), "source": "amass"} for l in stdout.splitlines() if "." in l.strip() and " " not in l.strip()]
+        return [
+            {"hostname": l.strip(), "source": "amass"}
+            for l in stdout.splitlines()
+            if "." in l.strip() and " " not in l.strip()
+        ]
 
 
 class FindomainAdapter(BaseAdapter):
@@ -48,7 +53,11 @@ class FindomainAdapter(BaseAdapter):
         return [self.binary, "-t", domain, "-q"]
 
     def parse(self, stdout, stderr=""):
-        return [{"hostname": l.strip(), "source": "findomain"} for l in stdout.splitlines() if "." in l.strip() and " " not in l.strip()]
+        return [
+            {"hostname": l.strip(), "source": "findomain"}
+            for l in stdout.splitlines()
+            if "." in l.strip() and " " not in l.strip()
+        ]
 
 
 class AssetfinderAdapter(BaseAdapter):
@@ -59,7 +68,11 @@ class AssetfinderAdapter(BaseAdapter):
         return [self.binary, "--subs-only", domain]
 
     def parse(self, stdout, stderr=""):
-        return [{"hostname": l.strip(), "source": "assetfinder"} for l in stdout.splitlines() if "." in l.strip() and " " not in l.strip()]
+        return [
+            {"hostname": l.strip(), "source": "assetfinder"}
+            for l in stdout.splitlines()
+            if "." in l.strip() and " " not in l.strip()
+        ]
 
 
 class CrtshAdapter(BaseAdapter):
@@ -99,6 +112,7 @@ class CrtshAdapter(BaseAdapter):
         # rebinding could otherwise redirect the query to internal space).
         try:
             from services.scope_engine.validator import host_resolves_to_blocked
+
             blocked, why = host_resolves_to_blocked("crt.sh")
             if blocked:
                 return AdapterResult("crtsh", status="FAILED", error=f"crt.sh {why}")
@@ -108,7 +122,9 @@ class CrtshAdapter(BaseAdapter):
             r = requests.get(f"https://crt.sh/?q=%25.{domain}&output=json", timeout=timeout)
             if r.status_code != 200:
                 return AdapterResult("crtsh", status="FAILED", error=f"HTTP {r.status_code}")
-            return AdapterResult("crtsh", status="COMPLETED", data=self.parse(r.text), raw=r.text[:100000])
+            return AdapterResult(
+                "crtsh", status="COMPLETED", data=self.parse(r.text), raw=r.text[:100000]
+            )
         except Exception as e:
             return AdapterResult("crtsh", status="FAILED", error=str(e)[:500])
 
@@ -139,11 +155,21 @@ class PurednsAdapter(BaseAdapter):
     binary = "puredns"
 
     def build_command(self, domain, wordlist=None, **kw):
-        cmd = [self.binary, "bruteforce", wordlist or "/usr/share/wordlists/subdomains.txt", domain, "--silent"]
+        cmd = [
+            self.binary,
+            "bruteforce",
+            wordlist or "/usr/share/wordlists/subdomains.txt",
+            domain,
+            "--silent",
+        ]
         return cmd
 
     def parse(self, stdout, stderr=""):
-        return [{"hostname": l.strip(), "source": "puredns"} for l in stdout.splitlines() if domain_in_line(l)]
+        return [
+            {"hostname": l.strip(), "source": "puredns"}
+            for l in stdout.splitlines()
+            if domain_in_line(l)
+        ]
 
 
 class DnsxAdapter(BaseAdapter):
@@ -164,8 +190,11 @@ class DnsxAdapter(BaseAdapter):
 
     def run(self, hosts, timeout=300, **kw):
         """Task 13: pipe hosts on stdin (build_command holds flags only)."""
-        return self.run_stdin(hosts, timeout=timeout,
-                              extra_args=["-silent", "-json", "-a", "-aaaa", "-cname", "-resp"])
+        return self.run_stdin(
+            hosts,
+            timeout=timeout,
+            extra_args=["-silent", "-json", "-a", "-aaaa", "-cname", "-resp"],
+        )
 
 
 class FfufAdapter(BaseAdapter):
@@ -173,7 +202,20 @@ class FfufAdapter(BaseAdapter):
     binary = "ffuf"
 
     def build_command(self, url, wordlist=None, **kw):
-        return [self.binary, "-u", url, "-w", wordlist or "/usr/share/wordlists/dirb.txt", "-mc", "200,301,302,401,403", "-o", "-", "-of", "json", "-s"]
+        return [
+            self.binary,
+            "-u",
+            url,
+            "-w",
+            wordlist or "/usr/share/wordlists/dirb.txt",
+            "-mc",
+            "200,301,302,401,403",
+            "-o",
+            "-",
+            "-of",
+            "json",
+            "-s",
+        ]
 
     def parse(self, stdout, stderr=""):
         try:
@@ -211,7 +253,19 @@ class HttpxAdapter(BaseAdapter):
     binary = "httpx"
 
     def build_command(self, hosts=None, **kw):
-        return [self.binary, "-silent", "-json", "-title", "-tech-detect", "-status-code", "-content-type", "-content-length", "-server", "-ip", "-tls-probe"]
+        return [
+            self.binary,
+            "-silent",
+            "-json",
+            "-title",
+            "-tech-detect",
+            "-status-code",
+            "-content-type",
+            "-content-length",
+            "-server",
+            "-ip",
+            "-tls-probe",
+        ]
 
     def parse(self, stdout, stderr=""):
         out = []
@@ -224,10 +278,22 @@ class HttpxAdapter(BaseAdapter):
 
     def run(self, hosts, timeout=600, **kw):
         """Task 13: pipe hosts/URLs on stdin (build_command holds flags only)."""
-        return self.run_stdin(hosts, timeout=timeout,
-                              extra_args=["-silent", "-json", "-title", "-tech-detect",
-                                          "-status-code", "-content-type", "-content-length",
-                                          "-server", "-ip", "-tls-probe"])
+        return self.run_stdin(
+            hosts,
+            timeout=timeout,
+            extra_args=[
+                "-silent",
+                "-json",
+                "-title",
+                "-tech-detect",
+                "-status-code",
+                "-content-type",
+                "-content-length",
+                "-server",
+                "-ip",
+                "-tls-probe",
+            ],
+        )
 
 
 class GauAdapter(BaseAdapter):
@@ -238,7 +304,11 @@ class GauAdapter(BaseAdapter):
         return [self.binary, domain, "--subs"]
 
     def parse(self, stdout, stderr=""):
-        return [{"url": l.strip(), "source": "gau"} for l in stdout.splitlines() if l.strip().startswith("http")]
+        return [
+            {"url": l.strip(), "source": "gau"}
+            for l in stdout.splitlines()
+            if l.strip().startswith("http")
+        ]
 
 
 class WaybackurlsAdapter(BaseAdapter):
@@ -249,7 +319,11 @@ class WaybackurlsAdapter(BaseAdapter):
         return [self.binary, domain]
 
     def parse(self, stdout, stderr=""):
-        return [{"url": l.strip(), "source": "waybackurls"} for l in stdout.splitlines() if l.strip().startswith("http")]
+        return [
+            {"url": l.strip(), "source": "waybackurls"}
+            for l in stdout.splitlines()
+            if l.strip().startswith("http")
+        ]
 
 
 class WaymoreAdapter(BaseAdapter):
@@ -260,7 +334,11 @@ class WaymoreAdapter(BaseAdapter):
         return [self.binary, "-i", domain, "-mode", "U"]
 
     def parse(self, stdout, stderr=""):
-        return [{"url": l.strip(), "source": "waymore"} for l in stdout.splitlines() if l.strip().startswith("http")]
+        return [
+            {"url": l.strip(), "source": "waymore"}
+            for l in stdout.splitlines()
+            if l.strip().startswith("http")
+        ]
 
 
 class KatanaAdapter(BaseAdapter):
@@ -303,7 +381,17 @@ class GobusterAdapter(BaseAdapter):
     binary = "gobuster"
 
     def build_command(self, url, wordlist=None, **kw):
-        return [self.binary, "dir", "-u", url, "-w", wordlist or "/usr/share/wordlists/dirb.txt", "-q", "-o", "-"]
+        return [
+            self.binary,
+            "dir",
+            "-u",
+            url,
+            "-w",
+            wordlist or "/usr/share/wordlists/dirb.txt",
+            "-q",
+            "-o",
+            "-",
+        ]
 
     def parse(self, stdout, stderr=""):
         out = []
@@ -355,7 +443,11 @@ class LinkfinderAdapter(BaseAdapter):
         return [self.binary, "-i", js_file or "", "-o", "cli"]
 
     def parse(self, stdout, stderr=""):
-        return [{"endpoint": l.strip(), "source": "linkfinder"} for l in stdout.splitlines() if l.strip().startswith("/") or l.strip().startswith("http")]
+        return [
+            {"endpoint": l.strip(), "source": "linkfinder"}
+            for l in stdout.splitlines()
+            if l.strip().startswith("/") or l.strip().startswith("http")
+        ]
 
 
 class SecretfinderAdapter(BaseAdapter):
@@ -404,14 +496,29 @@ class RetirejsAdapter(BaseAdapter):
 
 
 ADAPTERS = {
-    "subfinder": SubfinderAdapter, "amass": AmassAdapter, "findomain": FindomainAdapter,
-    "assetfinder": AssetfinderAdapter, "crtsh": CrtshAdapter, "knockpy": KnockpyAdapter,
-    "puredns": PurednsAdapter, "dnsx": DnsxAdapter, "ffuf": FfufAdapter, "naabu": NaabuAdapter,
-    "httpx": HttpxAdapter, "gau": GauAdapter, "waybackurls": WaybackurlsAdapter,
-    "waymore": WaymoreAdapter, "katana": KatanaAdapter, "dirsearch": DirsearchAdapter,
-    "gobuster": GobusterAdapter, "nuclei": NucleiAdapter, "jsluice": JsluiceAdapter,
-    "linkfinder": LinkfinderAdapter, "secretfinder": SecretfinderAdapter,
-    "semgrep": SemgrepAdapter, "retire": RetirejsAdapter,
+    "subfinder": SubfinderAdapter,
+    "amass": AmassAdapter,
+    "findomain": FindomainAdapter,
+    "assetfinder": AssetfinderAdapter,
+    "crtsh": CrtshAdapter,
+    "knockpy": KnockpyAdapter,
+    "puredns": PurednsAdapter,
+    "dnsx": DnsxAdapter,
+    "ffuf": FfufAdapter,
+    "naabu": NaabuAdapter,
+    "httpx": HttpxAdapter,
+    "gau": GauAdapter,
+    "waybackurls": WaybackurlsAdapter,
+    "waymore": WaymoreAdapter,
+    "katana": KatanaAdapter,
+    "dirsearch": DirsearchAdapter,
+    "gobuster": GobusterAdapter,
+    "nuclei": NucleiAdapter,
+    "jsluice": JsluiceAdapter,
+    "linkfinder": LinkfinderAdapter,
+    "secretfinder": SecretfinderAdapter,
+    "semgrep": SemgrepAdapter,
+    "retire": RetirejsAdapter,
 }
 
 
@@ -423,7 +530,9 @@ def tool_health():
         inst = cls()
         import shutil as _s
 
-        path = _s.which(getattr(inst, "binary", "") or "") or ("builtin" if name == "crtsh" else "missing")
+        path = _s.which(getattr(inst, "binary", "") or "") or (
+            "builtin" if name == "crtsh" else "missing"
+        )
         try:
             version = inst.version() if name != "crtsh" else "https-api"
         except Exception:

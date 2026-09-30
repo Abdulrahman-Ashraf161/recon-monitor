@@ -1,11 +1,24 @@
-# requirements.lock.txt — exact pinned working set (Task 28).
-# Generated from the verified venv (pip freeze); regenerate with:
+# requirements.lock.txt — exact pinned RUNTIME dependency set (Task 28).
+#
+# This is a runtime lock, not a full `pip freeze` of the development venv: it
+# deliberately omits test/lint/type tooling (pytest, pytest-django, coverage,
+# ruff, black, flake8, mypy, django-stubs). Those are developer conveniences and
+# are not installed in production images; see the tooling task for their pins.
+#
+# Django is pinned to the 5.2 LTS line because that is the line this repository
+# is actually verified against — requirements.txt constrains Django>=5.2,<5.3
+# and the full test suite plus all migrations pass on 5.2.17. The previous
+# Django==6.1.1 pin here contradicted both the venv and requirements.txt, so a
+# deploy built from this file would not have been the tested configuration.
+#
+# Regenerate with:
 #   pip-compile requirements.txt --generate-hashes -o requirements.lock.txt
 # and re-verify with: python manage.py test
-# NOTE: psycopg2-binary is pinned for Postgres/prod (not installed in this SQLite dev venv).
+# NOTE: psycopg2-binary is the Postgres/prod driver. It is not exercised by the
+# SQLite development venv's test run, so its pin tracks the image, not the venv.
 
 Automat==25.4.16
-Django==6.1.1
+Django==5.2.17
 Incremental==24.11.0
 Twisted==26.4.0
 amqp==5.4.0
@@ -53,4 +66,4 @@ urllib3==2.8.0
 vine==5.1.0
 wcwidth==0.9.1
 zope.interface==8.6
-psycopg2-binary==2.9.10  # prod Postgres driver (see NOTE above)
+psycopg2-binary==2.9.13  # prod Postgres driver (see NOTE above)

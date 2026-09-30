@@ -3,10 +3,33 @@
 Levels: CRITICAL/HIGH/MEDIUM/LOW/INFO based on explicit factors.
 Every result returns (level, reasons:list[str]).
 """
-ADMIN_HINTS = ("admin", "internal", "manage", "console", "dashboard", "login",
-               "auth", "token", "secret", "config", "debug", "test", "staging", "dev")
-INTERESTING_PORTS = {22: "ssh", 3389: "rdp", 3306: "mysql", 5432: "postgres",
-                     6379: "redis", 27017: "mongo", 8443: "alt-https", 8080: "alt-http"}
+
+ADMIN_HINTS = (
+    "admin",
+    "internal",
+    "manage",
+    "console",
+    "dashboard",
+    "login",
+    "auth",
+    "token",
+    "secret",
+    "config",
+    "debug",
+    "test",
+    "staging",
+    "dev",
+)
+INTERESTING_PORTS = {
+    22: "ssh",
+    3389: "rdp",
+    3306: "mysql",
+    5432: "postgres",
+    6379: "redis",
+    27017: "mongo",
+    8443: "alt-https",
+    8080: "alt-http",
+}
 
 ORDER = {"INFO": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
 
@@ -27,7 +50,12 @@ def prioritize_asset(asset_type, value="", change_type="", metadata=None):
             reasons.append(f"Name suggests sensitive surface ({hint})")
             break
     ct = (change_type or "").upper()
-    if ct in ("NEW_API_ENDPOINT", "NEW_SECURITY_FINDING", "CVE_VALIDATED", "NEW_JS_SECRET_CANDIDATE"):
+    if ct in (
+        "NEW_API_ENDPOINT",
+        "NEW_SECURITY_FINDING",
+        "CVE_VALIDATED",
+        "NEW_JS_SECRET_CANDIDATE",
+    ):
         level = _bump(level, "HIGH")
         reasons.append(f"High-impact change type {ct}")
     if ct in ("NEW_OPEN_PORT", "NEW_HTTP_SERVICE", "NEW_SUBDOMAIN"):
@@ -54,6 +82,9 @@ def prioritize_asset(asset_type, value="", change_type="", metadata=None):
 
 def prioritize_event(event_type, asset_value="", evidence=None):
     ev = evidence or {}
-    meta = {"port": ev.get("port", ""), "severity": ev.get("severity", ""),
-            "validation": ev.get("validation", "")}
+    meta = {
+        "port": ev.get("port", ""),
+        "severity": ev.get("severity", ""),
+        "validation": ev.get("validation", ""),
+    }
     return prioritize_asset(ev.get("asset_type", ""), asset_value, event_type, meta)

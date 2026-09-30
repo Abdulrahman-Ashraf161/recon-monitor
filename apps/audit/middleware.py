@@ -1,4 +1,5 @@
 """Record IP + user on requests for audit middleware context."""
+
 from django.utils.deprecation import MiddlewareMixin
 
 

@@ -1,4 +1,5 @@
 """Scope Validator — mandatory gate before ANY active operation."""
+
 import ipaddress
 
 # T4: SSRF guard — ranges that must never be actively fetched/scanned, even if a
@@ -7,10 +8,21 @@ import ipaddress
 # host_resolves_to_blocked() before every outbound fetch (defense-in-depth
 # against DNS rebinding: validate at connect time, not just ingest time).
 PRIVATE_BLOCK_NETWORKS = [
-    ipaddress.ip_network(n) for n in (
-        "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8",
-        "169.254.0.0/16", "172.16.0.0/12", "192.0.0.0/24", "192.168.0.0/16",
-        "198.18.0.0/15", "224.0.0.0/4", "::1/128", "fc00::/7", "fe80::/10",
+    ipaddress.ip_network(n)
+    for n in (
+        "0.0.0.0/8",
+        "10.0.0.0/8",
+        "100.64.0.0/10",
+        "127.0.0.0/8",
+        "169.254.0.0/16",
+        "172.16.0.0/12",
+        "192.0.0.0/24",
+        "192.168.0.0/16",
+        "198.18.0.0/15",
+        "224.0.0.0/4",
+        "::1/128",
+        "fc00::/7",
+        "fe80::/10",
     )
 ]
 
@@ -21,8 +33,12 @@ def is_private_or_reserved(ip_str: str) -> bool:
         addr = ipaddress.ip_address(str(ip_str).strip())
     except ValueError:
         return True
-    return (any(addr in net for net in PRIVATE_BLOCK_NETWORKS)
-            or addr.is_multicast or addr.is_reserved or addr.is_unspecified)
+    return (
+        any(addr in net for net in PRIVATE_BLOCK_NETWORKS)
+        or addr.is_multicast
+        or addr.is_reserved
+        or addr.is_unspecified
+    )
 
 
 def host_resolves_to_blocked(hostname: str) -> tuple[bool, str]:
@@ -38,8 +54,10 @@ def host_resolves_to_blocked(hostname: str) -> tuple[bool, str]:
         infos = socket.getaddrinfo(hostname, None)
     except Exception:
         return False, "unresolvable"
-    for fam, _, _, _, sockaddr in infos:
-        ip = sockaddr[0]
+    for _fam, _, _, _, sockaddr in infos:
+        # getaddrinfo always yields a textual address in sockaddr[0]; the stub
+        # types it as `str | int` for the AF_UNIX case, which cannot occur here.
+        ip = str(sockaddr[0])
         # Strip IPv6 zone ids (fe80::1%eth0) before parsing.
         ip = ip.split("%")[0]
         if is_private_or_reserved(ip):

@@ -1,4 +1,5 @@
 """Base adapter: validate input -> build command -> execute -> capture -> parse -> normalize."""
+
 import hashlib
 import shutil
 import subprocess
@@ -7,13 +8,37 @@ DEFAULT_TIMEOUT = 300
 
 
 class AdapterResult:
-    def __init__(self, tool, status="COMPLETED", data=None, raw="", error="", duration_ms=0):
+    """Normalised tool result.
+
+    P1-002: carries the full execution evidence needed to persist a complete
+    ``ToolExecution`` row -- the (already redacted) command, the process exit
+    code, and the captured stdout/stderr streams that get referenced from the
+    database row.
+    """
+
+    def __init__(
+        self,
+        tool,
+        status="COMPLETED",
+        data=None,
+        raw="",
+        error="",
+        duration_ms=0,
+        command="",
+        exit_code=None,
+        stdout="",
+        stderr="",
+    ):
         self.tool = tool
         self.status = status  # COMPLETED/FAILED/PARTIAL/SKIPPED
         self.data = data or []
         self.raw = raw
         self.error = error
         self.duration_ms = duration_ms
+        self.command = command  # redacted command line, never secrets
+        self.exit_code = exit_code
+        self.stdout = stdout
+        self.stderr = stderr
 
 
 class BaseAdapter:
@@ -53,7 +78,9 @@ class BaseAdapter:
         if not self.is_available():
             return "missing"
         try:
-            p = subprocess.run([self.binary, "-version"], capture_output=True, text=True, timeout=15)
+            p = subprocess.run(
+                [self.binary, "-version"], capture_output=True, text=True, timeout=15
+            )
             out = (p.stdout + p.stderr).strip().splitlines()
             return out[0][:80] if out else "unknown"
         except Exception:
@@ -65,55 +92,98 @@ class BaseAdapter:
     def parse(self, stdout: str, stderr: str = ""):
         raise NotImplementedError
 
-    def run_stdin(self, hosts, timeout=DEFAULT_TIMEOUT, extra_args=None):
+    def run_stdin(self, hosts, timeout=DEFAULT_TIMEOUT, extra_args=None, cancel_check=None):
         """Task 13: run the tool with hosts piped on stdin (dnsx/httpx style).
 
         Returns AdapterResult(COMPLETED/PARTIAL/FAILED/SKIPPED, data,
         raw[:100k], error[:2k], duration_ms). Missing binary -> SKIPPED,
         TimeoutExpired -> FAILED (never hangs the worker).
+
+        ``cancel_check`` (P0-013): an optional callable invoked repeatedly while
+        the tool runs; when it raises (a kill-switch trip), the tool's whole
+        process group is terminated before the exception propagates. This is
+        what makes a 300s DNS pass actually stop the moment the target is
+        paused instead of running to completion.
         """
-        import subprocess
         import time
 
         if not self.is_available():
-            return AdapterResult(self.tool_name, status="SKIPPED",
-                                 error=f"{self.binary} not installed")
+            return AdapterResult(
+                self.tool_name,
+                status="SKIPPED",
+                error=f"{self.binary} not installed",
+                command=redact_command([self.binary, *(extra_args or [])]),
+                exit_code=None,
+            )
         try:
             binary = self.resolved_binary()
         except Exception:
             binary = self.binary
-        cmd = [binary] + list(extra_args or [])
-        stdin_text = hosts if isinstance(hosts, str) else '\n'.join(hosts)
+        cmd = [binary, *(extra_args or [])]
+        cmd_redacted = redact_command(cmd)
+        stdin_text = hosts if isinstance(hosts, str) else "\n".join(hosts)
         start = time.time()
         try:
-            proc = subprocess.run(cmd, input=stdin_text, capture_output=True,
-                                  text=True, timeout=timeout)
+            returncode, stdout, stderr = _run_tool_process(
+                cmd, stdin_text=stdin_text, timeout=timeout, cancel_check=cancel_check
+            )
             dur = int((time.time() - start) * 1000)
         except subprocess.TimeoutExpired:
-            return AdapterResult(self.tool_name, status="FAILED", error="timeout")
-        except Exception as e:
-            return AdapterResult(self.tool_name, status="FAILED", error=str(e)[:2000])
-        data = self.parse(proc.stdout, proc.stderr)
-        if proc.returncode != 0 and not proc.stdout.strip():
-            return AdapterResult(self.tool_name, status="FAILED", raw=proc.stdout[:100000],
-                                 error=proc.stderr[:2000], duration_ms=dur)
-        status = "COMPLETED" if proc.returncode == 0 else "PARTIAL"
-        return AdapterResult(self.tool_name, status=status, data=data,
-                             raw=proc.stdout[:100000],
-                             error=proc.stderr[:2000] if proc.returncode else "",
-                             duration_ms=dur)
+            return AdapterResult(
+                self.tool_name,
+                status="FAILED",
+                error="timeout",
+                command=cmd_redacted,
+                exit_code=None,
+            )
+        except Exception:
+            raise  # kill-switch trip: let the caller's cancellation handler run
+        if returncode != 0 and not stdout.strip():
+            return AdapterResult(
+                self.tool_name,
+                status="FAILED",
+                raw=stdout[:100000],
+                error=stderr[:2000],
+                duration_ms=dur,
+                command=cmd_redacted,
+                exit_code=returncode,
+                stdout=stdout,
+                stderr=stderr,
+            )
+        data = self.parse(stdout, stderr)
+        status = "COMPLETED" if returncode == 0 else "PARTIAL"
+        return AdapterResult(
+            self.tool_name,
+            status=status,
+            data=data,
+            raw=stdout[:100000],
+            error=stderr[:2000] if returncode else "",
+            duration_ms=dur,
+            command=cmd_redacted,
+            exit_code=returncode,
+            stdout=stdout,
+            stderr=stderr,
+        )
 
-    def run(self, *args, timeout=DEFAULT_TIMEOUT, **kwargs):
+    def run(self, *args, timeout=DEFAULT_TIMEOUT, cancel_check=None, **kwargs):
         if not self.is_available():
-            return AdapterResult(self.tool_name, status="SKIPPED", error=f"{self.binary} not installed")
+            return AdapterResult(
+                self.tool_name,
+                status="SKIPPED",
+                error=f"{self.binary} not installed",
+                command=redact_command([self.binary]),
+            )
         cmd = self.build_command(*args, **kwargs)
         # T25: execute the pinned binary when TOOL_BIN_DIR provides one.
         try:
             resolved = self.resolved_binary()
             if cmd and cmd[0] == self.binary and resolved != self.binary:
-                cmd = [resolved] + list(cmd[1:])
+                cmd = [resolved, *cmd[1:]]
         except Exception:
             pass
+        # P1-002: the persisted command is the redacted rendering of exactly
+        # what runs, so an auditor can reproduce it without seeing credentials.
+        cmd_redacted = redact_command(cmd)
         # T25: in production without pinning, resolving via ambient PATH is
         # worth a warning (binary-planting defense-in-depth).
         import logging as _logging
@@ -121,25 +191,155 @@ class BaseAdapter:
 
         from django.conf import settings
 
-        if (not getattr(settings, "TOOL_BIN_DIR", "") and not os.environ.get("TOOL_BIN_DIR", "")
-                and getattr(settings, "DEBUG", True) is False):
+        if (
+            not getattr(settings, "TOOL_BIN_DIR", "")
+            and not os.environ.get("TOOL_BIN_DIR", "")
+            and getattr(settings, "DEBUG", True) is False
+        ):
             _logging.getLogger(__name__).warning(
-                "TOOL_BIN_DIR not set — resolving %s via ambient PATH", self.binary)
+                "TOOL_BIN_DIR not set — resolving %s via ambient PATH", self.binary
+            )
         import time
 
         start = time.time()
         try:
-            p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            returncode, stdout, stderr = _run_tool_process(
+                cmd, stdin_text="", timeout=timeout, cancel_check=cancel_check
+            )
             dur = int((time.time() - start) * 1000)
-            if p.returncode != 0 and not p.stdout.strip():
-                return AdapterResult(self.tool_name, status="FAILED", raw=p.stdout, error=p.stderr[:2000], duration_ms=dur)
-            data = self.parse(p.stdout, p.stderr)
-            status = "COMPLETED" if p.returncode == 0 else "PARTIAL"
-            return AdapterResult(self.tool_name, status=status, data=data, raw=p.stdout[:100000], error=p.stderr[:2000] if p.returncode else "", duration_ms=dur)
         except subprocess.TimeoutExpired:
-            return AdapterResult(self.tool_name, status="FAILED", error="timeout")
-        except Exception as e:
-            return AdapterResult(self.tool_name, status="FAILED", error=str(e)[:1000])
+            return AdapterResult(
+                self.tool_name,
+                status="FAILED",
+                error="timeout",
+                command=cmd_redacted,
+                exit_code=None,
+            )
+        except Exception:
+            raise  # kill-switch trip: let the caller's cancellation handler run
+        if returncode != 0 and not stdout.strip():
+            return AdapterResult(
+                self.tool_name,
+                status="FAILED",
+                raw=stdout,
+                error=stderr[:2000],
+                duration_ms=dur,
+                command=cmd_redacted,
+                exit_code=returncode,
+                stdout=stdout,
+                stderr=stderr,
+            )
+        data = self.parse(stdout, stderr)
+        status = "COMPLETED" if returncode == 0 else "PARTIAL"
+        return AdapterResult(
+            self.tool_name,
+            status=status,
+            data=data,
+            raw=stdout[:100000],
+            error=stderr[:2000] if returncode else "",
+            duration_ms=dur,
+            command=cmd_redacted,
+            exit_code=returncode,
+            stdout=stdout,
+            stderr=stderr,
+        )
+
+
+def _kill_tool_group(proc, grace=5.0):
+    """SIGTERM a tool's whole process group, then SIGKILL after `grace`.
+
+    ``start_new_session=True`` gives the tool its own process group so a
+    spawned backend subprocess is killed too — a plain ``proc.kill()`` would
+    only reap the direct child and could orphan the child's children.
+    """
+    import os
+    import signal
+
+    if proc.poll() is not None:
+        return
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+    except (ProcessLookupError, PermissionError, ValueError):
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+    if grace:
+        try:
+            proc.wait(timeout=grace)
+        except subprocess.TimeoutExpired:
+            pass
+        except Exception:
+            pass
+    if proc.poll() is None:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, ValueError):
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        try:
+            proc.wait(timeout=10)
+        except Exception:
+            pass
+
+
+def _run_tool_process(cmd, stdin_text="", timeout=DEFAULT_TIMEOUT, cancel_check=None):
+    """Run a tool in its own process group; stop the group on timeout/cancel.
+
+    Polls ``cancel_check`` (the kill-switch callback) every ~0.2s instead of
+    blocking on the child, so a pause or an authorization lapse terminates the
+    tool process group immediately rather than waiting for a 5-minute default
+    timeout. Raises ``subprocess.TimeoutExpired`` on timeout; on cancellation
+    the original exception from ``cancel_check`` is re-raised *after* the group
+    is terminated, so the caller's own cancellation handling runs.
+
+    Returns ``(returncode, stdout, stderr)``.
+    """
+    import threading
+    import time
+
+    proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    collected = {}
+
+    def _pump():
+        try:
+            collected["out"], collected["err"] = proc.communicate(stdin_text)
+        except Exception as exc:
+            collected["pump_exc"] = exc
+
+    pump = threading.Thread(target=_pump, daemon=True)
+    pump.start()
+
+    deadline = time.monotonic() + timeout
+    cancelled = None
+    try:
+        while proc.poll() is None:
+            try:
+                if cancel_check is not None:
+                    cancel_check()
+            except BaseException as exc:
+                cancelled = exc
+                _kill_tool_group(proc, grace=2.0)
+                break
+            if time.monotonic() > deadline:
+                raise subprocess.TimeoutExpired(cmd, timeout)
+            time.sleep(0.2)
+    finally:
+        if proc.poll() is None:
+            _kill_tool_group(proc, grace=2.0)
+        pump.join(timeout=5)
+    if cancelled is not None:
+        raise cancelled
+    return proc.returncode, collected.get("out", ""), collected.get("err", "")
 
 
 def sha256_text(text: str) -> str:
@@ -158,17 +358,54 @@ def redact_command(cmd: list[str]) -> str:
     import re
 
     SECRET_FLAG_NAMES = {
-        "-shodan-key", "--shodan-key", "-censys-key", "--censys-key",
-        "-virustotal-key", "--virustotal-key", "-github-token", "--github-token",
-        "-chaos-key", "--chaos-key", "-urlscan-key", "--urlscan-key",
-        "-api-key", "--api-key", "-apikey", "--apikey", "-token", "--token",
-        "-secret", "--secret", "-password", "--password", "-passwd", "--passwd",
-        "-pwd", "--pwd", "-h", "--header", "-H",
+        "-shodan-key",
+        "--shodan-key",
+        "-censys-key",
+        "--censys-key",
+        "-virustotal-key",
+        "--virustotal-key",
+        "-github-token",
+        "--github-token",
+        "-chaos-key",
+        "--chaos-key",
+        "-urlscan-key",
+        "--urlscan-key",
+        "-api-key",
+        "--api-key",
+        "-apikey",
+        "--apikey",
+        "-token",
+        "--token",
+        "-secret",
+        "--secret",
+        "-password",
+        "--password",
+        "-passwd",
+        "--passwd",
+        "-pwd",
+        "--pwd",
+        "-h",
+        "--header",
+        "-H",
     }
     SECRET_CONTENT_MARKERS = (
-        "webhook", "token", "secret", "key=", "password", "passwd", "pwd=",
-        "authorization", "bearer", "apikey", "api_key", "cookie=", "session=",
-        "credential", "x-amz-signature", "hooks.slack.com", "discord.com/api/webhooks",
+        "webhook",
+        "token",
+        "secret",
+        "key=",
+        "password",
+        "passwd",
+        "pwd=",
+        "authorization",
+        "bearer",
+        "apikey",
+        "api_key",
+        "cookie=",
+        "session=",
+        "credential",
+        "x-amz-signature",
+        "hooks.slack.com",
+        "discord.com/api/webhooks",
     )
     _USERINFO_RE = re.compile(r"(://[^/\s]*?)([^/\s:@]+):([^/\s@]+)@")
 

@@ -1,0 +1,46 @@
+# Build context exclusions (P3-007).
+#
+# Without this, `COPY . .` in the Dockerfile would bake the following into the
+# production image: the developer's virtualenv (hundreds of MB), the local
+# SQLite database, generated evidence (data/raw = tool stdout, exports), the
+# VCS history, and -- most importantly -- the local .env, i.e. real secrets.
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# secrets
+docker/.env
+*.pem
+*.key
+
+# Keep the example so operators can see which vars to set. The negation MUST
+# come last: dockerignore is last-match-wins, so a broad `.env*` rule placed
+# after this line would silently re-include the real secret.
+.env
+.env.*
+!.env.example
+
+# local data / generated artifacts
+data/
+db.sqlite3
+db.sqlite3-journal
+*.log
+/media/
+/staticfiles/
+
+# VCS and docs that do not belong in a runtime image
+.git/
+.gitignore
+.github/
+docs/
+tests/
+*.md
+!README.md

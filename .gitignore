@@ -7,6 +7,11 @@ db.sqlite3
 /media/
 data/raw/*
 !data/raw/.gitkeep
+# Cloned CVE knowledge base (P1-007 sync target). This is a ~650MB git clone of
+# CVEProject/cvelistV5 that is re-fetched by the sync task; it is generated data,
+# not source, and must never be committed.
+data/cvelistV5/
+data/cve*/
 data/artifacts/*
 !data/artifacts/.gitkeep
 data/exports/*
@@ -14,3 +19,27 @@ data/exports/*
 data/reports/*
 !data/reports/.gitkeep
 celerybeat-schedule
+
+# --- sensitive material: never commit ---
+*.db
+*.sqlite3-journal
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa
+id_ed25519
+
+# --- test / coverage / type-cache artifacts ---
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- runtime logs ---
+*.log
+logs/
+celerybeat-schedule*

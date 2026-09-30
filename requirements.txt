@@ -1,4 +1,9 @@
-Django>=5.0,<6.0
+# Django 5.2 is the long-term-support line this project targets. The upper
+# bound is deliberately <5.3 rather than <6.0 so a new major release cannot
+# change behaviour under a deploy without an explicit decision: the test suite
+# and the migrations in this repository are verified against 5.2.x only.
+# requirements.lock.txt pins the exact verified version.
+Django>=5.2,<5.3
 djangorestframework>=3.15
 django-filter>=24
 channels>=4
